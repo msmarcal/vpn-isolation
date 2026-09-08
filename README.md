@@ -1,4 +1,4 @@
-# customer-vpn-isolation
+# vpn-isolation
 
 Isolate corporate VPN clients (Cisco AnyConnect/openconnect, Palo Alto GlobalProtect, OpenVPN, and future protocols) inside LXD containers, so no VPN ever rewrites routes/DNS on the host laptop.
 
@@ -13,8 +13,8 @@ Multiple VPN clients (native vendor client, NetworkManager/openconnect, OpenVPN)
 ## Quick start
 
 ```bash
-git clone https://git.msmarcal.xyz/msmarcal/customer-vpn-isolation.git
-cd customer-vpn-isolation
+git clone https://git.msmarcal.xyz/msmarcal/vpn-isolation.git
+cd vpn-isolation
 chmod +x scripts/create-vpn-lxd-container.sh
 
 # Cisco AnyConnect example
@@ -35,23 +35,28 @@ Full guide: [`docs/lxd-vpn-client-containers.md`](docs/lxd-vpn-client-containers
 | Palo Alto GlobalProtect | `--protocol gp` |
 | OpenVPN | `--protocol openvpn --ovpn <file>` |
 
-New VPNs/protocols: add a new container with the matching template; document any new quirks in `docs/lxd-vpn-client-containers.md`.
+New VPNs/protocols: the script is plugin-based - drop a new `scripts/lib/protocol-<name>.sh` implementing the small contract described in [`docs/adding-a-protocol.md`](docs/adding-a-protocol.md). No changes to the orchestrator are needed.
 
 ## Repo layout
 
 ```
-customer-vpn-isolation/
+vpn-isolation/
 ├── README.md
 ├── docs/
-│   └── lxd-vpn-client-containers.md   # full setup + troubleshooting guide
+│   ├── lxd-vpn-client-containers.md   # full setup + troubleshooting guide
+│   └── adding-a-protocol.md           # plugin contract for new VPN protocols
 └── scripts/
-    └── create-vpn-lxd-container.sh    # container creation / connect-vpn / disconnect-vpn installer
+    ├── create-vpn-lxd-container.sh    # orchestrator: LXD profile/launch, dispatch to protocol libs
+    └── lib/
+        ├── common.sh                  # shared helpers (split routes, interface wait)
+        ├── protocol-anyconnect.sh     # Cisco AnyConnect (openconnect)
+        ├── protocol-gp.sh             # Palo Alto GlobalProtect (openconnect)
+        └── protocol-openvpn.sh        # OpenVPN (.ovpn profile)
 ```
 
 ## Security notes
 
 - Never commit `.ovpn` files, certs, keys, or credentials to this repo. Push them directly into the container with `lxc file push` (see docs) and keep them out of git.
-- This repo is **private**.
 - If a VPN password/token ever leaks in a terminal paste or log, rotate it immediately.
 
 ## Roadmap / open items

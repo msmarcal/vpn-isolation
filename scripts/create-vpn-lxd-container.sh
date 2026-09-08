@@ -2,10 +2,11 @@
 # create-vpn-lxd-container.sh
 # Create an LXD container that isolates a corporate VPN from the host.
 #
-# Protocols:
-#   anyconnect  - Cisco AnyConnect via openconnect (optionally with MFA)
-#   gp          - Palo Alto GlobalProtect via openconnect
-#   openvpn     - OpenVPN client, typically a server-exported .ovpn profile
+# Protocols are pluggable: each scripts/lib/protocol-<name>.sh implements a
+# small contract of functions (see scripts/lib/protocol-openvpn.sh for the
+# most complete example, or docs/adding-a-protocol.md for the full contract).
+# This orchestrator never needs to change to add a new protocol - drop a new
+# lib/protocol-<name>.sh file next to the others and it's available.
 #
 # Examples:
 #   # Cisco AnyConnect
@@ -28,9 +29,22 @@
 #     --ovpn ~/Downloads/profile.ovpn \
 #     --routes 10.10.0.0/16
 #
-# Docs: docs/lxd-vpn-client-containers.md
+# Docs: docs/lxd-vpn-client-containers.md, docs/adding-a-protocol.md
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/lib"
+
+# shellcheck source=lib/common.sh
+source "${LIB_DIR}/common.sh"
+
+# Discover available protocols from lib/protocol-*.sh (sorted, stable order).
+declare -a AVAILABLE_PROTOCOLS=()
+for f in "${LIB_DIR}"/protocol-*.sh; do
+  [[ -e "$f" ]] || continue
+  AVAILABLE_PROTOCOLS+=("$(basename "$f" .sh | sed 's/^protocol-//')")
+done
 
 NAME=""
 PROTOCOL=""
@@ -49,13 +63,13 @@ LAUNCHPAD_ID=""
 GITHUB_ID=""
 
 usage() {
-  cat <<'EOF'
+  cat <<EOF
 Usage:
   create-vpn-lxd-container.sh --name NAME --protocol PROTO --routes CIDRS [options]
 
 Required:
   --name NAME              Container name (e.g. vpn-example-anyconnect)
-  --protocol PROTO         anyconnect | gp | openvpn
+  --protocol PROTO         One of: ${AVAILABLE_PROTOCOLS[*]}
   --routes CIDRS           Comma-separated split routes (e.g. 10.1.0.0/16,10.2.0.0/24)
 
 Protocol-specific:
@@ -75,6 +89,9 @@ Optional:
   --launchpad-id ID        Import SSH keys via 'ssh-import-id lp:ID' (preferred)
   --github-id ID           Import SSH keys via 'ssh-import-id gh:ID' (combinable with --launchpad-id)
   -h, --help               Show this help
+
+Adding a new protocol: see docs/adding-a-protocol.md - no changes to this
+file are required, just drop scripts/lib/protocol-<name>.sh.
 EOF
   exit 1
 }
@@ -105,33 +122,17 @@ if [[ -z "$NAME" || -z "$PROTOCOL" || -z "$ROUTES" ]]; then
   usage
 fi
 
-case "$PROTOCOL" in
-  anyconnect|gp)
-    if [[ -z "$GATEWAY" ]]; then
-      echo "ERROR: --gateway is required for protocol=${PROTOCOL}" >&2
-      exit 1
-    fi
-    BUILD_OPENCONNECT_DEFAULT=1
-    ;;
-  openvpn)
-    if [[ -z "$OVPN" ]]; then
-      echo "ERROR: --ovpn is required for protocol=openvpn" >&2
-      exit 1
-    fi
-    if [[ ! -f "$OVPN" ]]; then
-      echo "ERROR: ovpn file not found: $OVPN" >&2
-      exit 1
-    fi
-    BUILD_OPENCONNECT_DEFAULT=0
-    ;;
-  *)
-    echo "ERROR: unsupported --protocol '$PROTOCOL' (use anyconnect|gp|openvpn)" >&2
-    exit 1
-    ;;
-esac
+PROTOCOL_LIB="${LIB_DIR}/protocol-${PROTOCOL}.sh"
+if [[ ! -f "$PROTOCOL_LIB" ]]; then
+  echo "ERROR: unsupported --protocol '$PROTOCOL' (available: ${AVAILABLE_PROTOCOLS[*]})" >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+source "$PROTOCOL_LIB"
 
-# If user didn't pass --build-openconnect but protocol benefits from it, keep default off
-# unless they asked. (anyconnect/gp strongly recommended - warn later)
+proto_validate_args
+
+BUILD_OPENCONNECT_DEFAULT="$(proto_needs_build_openconnect)"
 if [[ "$BUILD_OPENCONNECT" -eq 0 && "$BUILD_OPENCONNECT_DEFAULT" -eq 1 ]]; then
   echo "NOTE: protocol=${PROTOCOL} usually needs openconnect 9.21+. Consider re-running with --build-openconnect." >&2
 fi
@@ -199,14 +200,8 @@ lxc exec --env DEBIAN_FRONTEND=noninteractive "$NAME" -- apt-get install -y -qq 
   iproute2 iptables curl ca-certificates openssh-client openssh-server \
   iputils-ping dnsutils nano
 
-case "$PROTOCOL" in
-  anyconnect|gp)
-    lxc exec --env DEBIAN_FRONTEND=noninteractive "$NAME" -- apt-get install -y -qq openconnect vpnc-scripts
-    ;;
-  openvpn)
-    lxc exec --env DEBIAN_FRONTEND=noninteractive "$NAME" -- apt-get install -y -qq openvpn
-    ;;
-esac
+# shellcheck disable=SC2046
+lxc exec --env DEBIAN_FRONTEND=noninteractive "$NAME" -- apt-get install -y -qq $(proto_apt_packages)
 
 if [[ "$BUILD_OPENCONNECT" -eq 1 ]]; then
   echo "==> Building openconnect ${OPENCONNECT_TAG} from source"
@@ -235,40 +230,28 @@ if [[ "$BUILD_OPENCONNECT" -eq 1 ]]; then
 fi
 
 echo "==> Writing /etc/vpn-client.env"
+ENV_EXTRA="$(proto_write_env_extra)"
 lxc exec "$NAME" -- bash -lc "cat > /etc/vpn-client.env <<EOF
 # Managed by create-vpn-lxd-container.sh
 VPN_PROTOCOL=${PROTOCOL}
-VPN_GATEWAY=${GATEWAY}
 VPN_ROUTES=${ROUTES}
 VPN_DNS_DOMAIN=${DNS_DOMAIN}
 VPN_INTERFACE=vpn0
-VPN_ROUTE_NOPULL=${ROUTE_NOPULL}
-VPN_OVPN=/etc/openvpn/client/client.ovpn
+${ENV_EXTRA}
 EOF
 chmod 644 /etc/vpn-client.env
 "
 
-if [[ "$PROTOCOL" == "openvpn" ]]; then
-  echo "==> Installing OpenVPN profile"
-  lxc exec "$NAME" -- mkdir -p /etc/openvpn/client
-  lxc file push "$OVPN" "$NAME/etc/openvpn/client/client.ovpn" >/dev/null
-  lxc exec "$NAME" -- chmod 600 /etc/openvpn/client/client.ovpn
-
-  # If the ovpn references external files in the same directory, push siblings when present
-  OVPN_DIR="$(cd "$(dirname "$OVPN")" && pwd)"
-  while read -r ref; do
-    [[ -z "$ref" ]] && continue
-    # skip inline / absolute outside common cases; only push same-dir relative files
-    if [[ "$ref" != /* && -f "${OVPN_DIR}/${ref}" ]]; then
-      echo "    pushing referenced file: $ref"
-      lxc file push "${OVPN_DIR}/${ref}" "$NAME/etc/openvpn/client/${ref}" >/dev/null
-      lxc exec "$NAME" -- chmod 600 "/etc/openvpn/client/${ref}"
-    fi
-  done < <(grep -E '^(ca|cert|key|tls-auth|tls-crypt|pkcs12|auth-user-pass) ' "$OVPN" | awk '{print $2}' | sed 's/"//g' || true)
+# Optional protocol-side host hook (e.g. openvpn pushing the .ovpn profile)
+if declare -f proto_post_install >/dev/null 2>&1; then
+  proto_post_install "$NAME"
 fi
 
 echo "==> Installing connect-vpn / disconnect-vpn"
-lxc exec "$NAME" -- bash -lc 'cat > /usr/local/bin/connect-vpn <<'\''EOF'\''
+# Assemble the in-container connect-vpn script: shared helpers (common.sh) +
+# this protocol's proto_connect implementation + a small runner.
+CONNECT_VPN_BODY="$(
+  cat <<'HEADER'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -278,100 +261,31 @@ ENV_FILE=/etc/vpn-client.env
 VPN_PROTOCOL="${VPN_PROTOCOL:?Set VPN_PROTOCOL in /etc/vpn-client.env}"
 VPN_ROUTES="${VPN_ROUTES:-}"
 VPN_INTERFACE="${VPN_INTERFACE:-vpn0}"
-VPN_GATEWAY="${VPN_GATEWAY:-}"
-VPN_OVPN="${VPN_OVPN:-/etc/openvpn/client/client.ovpn}"
-VPN_ROUTE_NOPULL="${VPN_ROUTE_NOPULL:-1}"
 
-apply_split_routes() {
-  local iface="$1"
-  [[ -z "$VPN_ROUTES" ]] && return 0
-  IFS="," read -ra RLIST <<< "$VPN_ROUTES"
-  for cidr in "${RLIST[@]}"; do
-    cidr_trimmed="$(echo "$cidr" | xargs)"
-    [[ -z "$cidr_trimmed" ]] && continue
-    echo "Adding split route: $cidr_trimmed dev $iface"
-    sudo ip route replace "$cidr_trimmed" dev "$iface" 2>/dev/null \
-      || sudo ip route add "$cidr_trimmed" dev "$iface" || true
-  done
-}
-
-wait_for_iface() {
-  local iface="$1"
-  local i
-  for i in $(seq 1 40); do
-    if ip link show "$iface" >/dev/null 2>&1; then
-      return 0
-    fi
-    # openvpn often uses tun0
-    if [[ "$iface" == "vpn0" ]] && ip link show tun0 >/dev/null 2>&1; then
-      VPN_INTERFACE=tun0
-      return 0
-    fi
-    sleep 1
-  done
-  return 1
-}
+HEADER
+  echo "# ---- shared helpers (scripts/lib/common.sh) ----"
+  cat "${LIB_DIR}/common.sh" | grep -v '^# lib/common.sh' | grep -v '^# Shared shell functions'
+  echo
+  echo "# ---- protocol implementation (scripts/lib/protocol-${PROTOCOL}.sh) ----"
+  proto_connect_snippet
+  cat <<'RUNNER'
 
 if pgrep -x openconnect >/dev/null 2>&1 || pgrep -x openvpn >/dev/null 2>&1; then
   echo "A VPN client is already running. Run disconnect-vpn first." >&2
   exit 1
 fi
 
-case "$VPN_PROTOCOL" in
-  anyconnect|gp)
-    [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; exit 1; }
-    echo "Connecting openconnect protocol=${VPN_PROTOCOL} to ${VPN_GATEWAY}"
-    echo "Split routes after connect: ${VPN_ROUTES:-<none>}"
-    echo
-    sudo openconnect \
-      --protocol="$VPN_PROTOCOL" \
-      --interface="$VPN_INTERFACE" \
-      -b \
-      "$VPN_GATEWAY"
-    if ! wait_for_iface "$VPN_INTERFACE"; then
-      echo "ERROR: tunnel interface did not appear (auth failed?)" >&2
-      exit 1
-    fi
-    apply_split_routes "$VPN_INTERFACE"
-    ;;
-  openvpn)
-    [[ -f "$VPN_OVPN" ]] || { echo "Missing profile: $VPN_OVPN" >&2; exit 1; }
-    echo "Connecting OpenVPN with $VPN_OVPN"
-    echo "Split routes after connect: ${VPN_ROUTES:-<none>}"
-    echo
-    EXTRA=()
-    if [[ "$VPN_ROUTE_NOPULL" == "1" ]]; then
-      EXTRA+=(--route-nopull)
-    fi
-    # Run in background; logs to /var/log/openvpn-client.log
-    sudo openvpn \
-      --config "$VPN_OVPN" \
-      --daemon openvpn-client \
-      --writepid /run/openvpn-client.pid \
-      --log /var/log/openvpn-client.log \
-      "${EXTRA[@]}"
-    VPN_INTERFACE=tun0
-    if ! wait_for_iface "$VPN_INTERFACE"; then
-      echo "ERROR: tun0 did not appear. Last log lines:" >&2
-      sudo tail -n 40 /var/log/openvpn-client.log 2>/dev/null || true
-      exit 1
-    fi
-    apply_split_routes "$VPN_INTERFACE"
-    ;;
-  *)
-    echo "Unsupported VPN_PROTOCOL=$VPN_PROTOCOL" >&2
-    exit 1
-    ;;
-esac
+proto_connect
 
 echo
 echo "VPN up on ${VPN_INTERFACE}."
 ip -br addr show "$VPN_INTERFACE" || true
 echo "Relevant routes:"
 ip route | grep -E "${VPN_INTERFACE}|$(echo "$VPN_ROUTES" | tr "," "|")" || ip route
-EOF
-chmod +x /usr/local/bin/connect-vpn
-'
+RUNNER
+)"
+
+printf '%s\n' "$CONNECT_VPN_BODY" | lxc exec "$NAME" -- bash -c 'cat > /usr/local/bin/connect-vpn && chmod +x /usr/local/bin/connect-vpn'
 
 lxc exec "$NAME" -- bash -lc 'cat > /usr/local/bin/disconnect-vpn <<'\''EOF'\''
 #!/usr/bin/env bash
@@ -480,14 +394,7 @@ fi
 lxc exec "$NAME" -- systemctl enable --now ssh >/dev/null
 
 IP="$(lxc list "$NAME" -c 4 --format csv 2>/dev/null | head -1 | awk -F, '{print $1}' | awk '{print $1}')"
-case "$PROTOCOL" in
-  anyconnect|gp)
-    TOOL_VER="$(lxc exec "$NAME" -- openconnect --version 2>/dev/null | head -1 || echo unknown)"
-    ;;
-  openvpn)
-    TOOL_VER="$(lxc exec "$NAME" -- openvpn --version 2>/dev/null | head -1 || echo unknown)"
-    ;;
-esac
+TOOL_VER="$(lxc exec "$NAME" -- bash -c "$(proto_version_cmd)" 2>/dev/null || echo unknown)"
 
 cat <<EOF
 
@@ -517,7 +424,10 @@ Host <internal-alias>
   User <remote-user>
   ProxyJump ${NAME}
 
-HTTP via SOCKS:
+HTTP via sshuttle (transparent, no per-app proxy config):
+  sshuttle -r ${NAME} ${ROUTES//,/ } --dns
+
+HTTP via SOCKS (no host routes touched):
   ssh -D 11080 -N ${NAME}
   curl --socks5-hostname 127.0.0.1:11080 http://internal/
 

@@ -57,7 +57,6 @@ customer-vpn-isolation/
 ## Security notes
 
 - Never commit `.ovpn` files, certs, keys, or credentials to this repo. Push them directly into the container with `lxc file push` (see docs) and keep them out of git.
-- This repo is **private**.
 - If a VPN password/token ever leaks in a terminal paste or log, rotate it immediately.
 
 ## Roadmap / open items

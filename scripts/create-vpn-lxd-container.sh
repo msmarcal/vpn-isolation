@@ -427,9 +427,5 @@ Host <internal-alias>
 HTTP via sshuttle (transparent, no per-app proxy config):
   sshuttle -r ${NAME} ${ROUTES//,/ } --dns
 
-HTTP via SOCKS (no host routes touched):
-  ssh -D 11080 -N ${NAME}
-  curl --socks5-hostname 127.0.0.1:11080 http://internal/
-
 Docs: docs/lxd-vpn-client-containers.md
 EOF

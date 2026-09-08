@@ -8,7 +8,7 @@ Isolate corporate VPN clients (Cisco AnyConnect/openconnect, Palo Alto GlobalPro
 
 Multiple VPN clients (native vendor client, NetworkManager/openconnect, OpenVPN) fighting over the same host routing table and `/etc/resolv.conf` causes daily breakage: DNS lost, wrong default route, leftover `tun`/`vpn0` interfaces, background agents conflicting with NetworkManager.
 
-**Fix:** one LXD container per VPN. Each container gets its own network namespace - routes and DNS changes stay inside it. The host only does SSH (`ProxyJump`) and, if needed, HTTP via a SOCKS tunnel into the container.
+**Fix:** one LXD container per VPN. Each container gets its own network namespace - routes and DNS changes stay inside it. The host only does SSH (`ProxyJump`) and, if needed, HTTP via `sshuttle` into the container.
 
 ## Quick start
 

@@ -18,7 +18,7 @@ Add a new container with the matching `--protocol` template for any new VPN. If 
 Host (laptop)
 ├── local LAN + LXD bridge (never touched by VPN containers)
 ├── ~/.ssh/config.d/<project>-config   # ProxyJump into container
-├── optional: ssh -D SOCKS for browser/curl
+├── optional: sshuttle for HTTP/HTTPS
 │
 ├── lxc: vpn-example-anyconnect     # openconnect anyconnect
 ├── lxc: vpn-example-globalprotect  # openconnect gp
@@ -139,7 +139,7 @@ Multi-hop chains (e.g. container -> internal jumphost -> final target) need each
 
 ### Occasional HTTP/HTTPS (sshuttle)
 
-`sshuttle` gives transparent access to the VPN's internal subnets without configuring a proxy in every tool - point it at the same CIDRs you passed to `--routes`, and any local app (browser, curl, etc) just works, no `--socks5-hostname` or `HTTPS_PROXY` juggling required.
+`sshuttle` gives transparent access to the VPN's internal subnets without configuring a proxy in every tool - point it at the same CIDRs you passed to `--routes`, and any local app (browser, curl, etc) just works, no per-app proxy or `HTTPS_PROXY` juggling required.
 
 Install once on the host (not inside the container):
 
@@ -157,13 +157,6 @@ sshuttle -r vpn-example-anyconnect 10.10.0.0/24 --dns
 - The CIDR list should match `--routes` (comma-separated `--routes` becomes multiple arguments here, e.g. `10.10.0.0/24 10.20.0.0/16`)
 - `--dns` resolves internal hostnames through the container instead of your local resolver, avoiding split-DNS issues
 - Runs in the foreground by default; add `-D --pidfile=/tmp/sshuttle-example.pid` to daemonize, and `sshuttle --stop-pidfile=/tmp/sshuttle-example.pid` (or `pkill -f sshuttle`) to stop it
-
-For a one-off `curl`/browser session, plain SOCKS still works if you prefer not to touch host routes at all:
-
-```bash
-ssh -D 11080 -N vpn-example-anyconnect
-curl --socks5-hostname 127.0.0.1:11080 http://internal.example/
-```
 
 ### Disconnect / stop
 

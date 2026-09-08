@@ -1,4 +1,4 @@
-# customer-vpn-isolation
+# vpn-isolation
 
 Isolate corporate VPN clients (Cisco AnyConnect/openconnect, Palo Alto GlobalProtect, OpenVPN, and future protocols) inside LXD containers, so no VPN ever rewrites routes/DNS on the host laptop.
 
@@ -13,8 +13,8 @@ Multiple VPN clients (native vendor client, NetworkManager/openconnect, OpenVPN)
 ## Quick start
 
 ```bash
-git clone https://git.msmarcal.xyz/msmarcal/customer-vpn-isolation.git
-cd customer-vpn-isolation
+git clone https://git.msmarcal.xyz/msmarcal/vpn-isolation.git
+cd vpn-isolation
 chmod +x scripts/create-vpn-lxd-container.sh
 
 # Cisco AnyConnect example
@@ -40,7 +40,7 @@ New VPNs/protocols: the script is plugin-based - drop a new `scripts/lib/protoco
 ## Repo layout
 
 ```
-customer-vpn-isolation/
+vpn-isolation/
 ├── README.md
 ├── docs/
 │   ├── lxd-vpn-client-containers.md   # full setup + troubleshooting guide

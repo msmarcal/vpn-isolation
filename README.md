@@ -13,9 +13,8 @@ Multiple VPN clients (native vendor client, NetworkManager/openconnect, OpenVPN)
 ## Quick start
 
 ```bash
-git clone https://git.msmarcal.xyz/msmarcal/vpn-isolation.git
+git clone <this repo>
 cd vpn-isolation
-chmod +x scripts/create-vpn-lxd-container.sh
 
 # Cisco AnyConnect example
 ./scripts/create-vpn-lxd-container.sh \

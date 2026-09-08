@@ -1,0 +1,221 @@
+# LXD VPN Client Containers (multi-protocol)
+
+Isolate corporate VPNs inside LXD containers so they never touch the host's routes, DNS, or other networking.
+
+## Supported protocol patterns
+
+| Example use case | Protocol | Client tooling inside container | Notes |
+|---|---|---|---|
+| Cisco AnyConnect / ASA-Firepower with SAML or token MFA | Cisco AnyConnect (openconnect) | `openconnect --protocol=anyconnect` | Gateway path matters (e.g. a group-specific path). Need openconnect **9.21+** on updated ASA/Firepower. Prefer the CLI over GUI auth dialogs. |
+| Palo Alto GlobalProtect | GlobalProtect (openconnect) | `openconnect --protocol=gp` | Same openconnect binary, different protocol. Portal vs gateway URL may differ - confirm with the vendor's portal docs. |
+| OpenVPN (server-issued profile) | OpenVPN | `openvpn` + `.ovpn` profile (+ optional auth user-pass / certs) | Usually a single `.ovpn` export from the server admin. Keep certs/keys only inside the container. |
+
+Add a new container with the matching `--protocol` template for any new VPN. If a VPN **mandates** a proprietary native client with GUI/HostScan/posture-check requirements, use a VM instead of a container.
+
+## Architecture
+
+```
+Host (laptop)
+├── local LAN + LXD bridge (never touched by VPN containers)
+├── ~/.ssh/config.d/<project>-config   # ProxyJump into container
+├── optional: ssh -D SOCKS for browser/curl
+│
+├── lxc: vpn-example-anyconnect     # openconnect anyconnect
+├── lxc: vpn-example-globalprotect  # openconnect gp
+├── lxc: vpn-example-openvpn        # openvpn + .ovpn profile
+└── (rare) VM                       # only if a native client is mandatory
+```
+
+Daily use is SSH + occasional HTTP/HTTPS. No RDP/VNC required.
+
+## Prerequisites on the host
+
+- LXD installed (`lxdbr0` present).
+- Do **not** keep host NetworkManager VPN profiles or a native VPN client session active while using these containers.
+- For Cisco/GlobalProtect portals that fail on distro-packaged openconnect (e.g. 404 on auth), build a recent openconnect inside the container (`--build-openconnect`).
+
+## One-time host setup
+
+```bash
+chmod +x scripts/create-vpn-lxd-container.sh
+```
+
+The create script ensures profile `vpn-client` exists (`eth0` on `lxdbr0`, `/dev/net/tun`, nesting).
+
+## Create containers
+
+### Cisco AnyConnect
+
+```bash
+./scripts/create-vpn-lxd-container.sh \
+  --name vpn-example-anyconnect \
+  --protocol anyconnect \
+  --gateway vpn.example.com/group-path \
+  --routes 10.10.0.0/24 \
+  --dns-domain internal.example.com \
+  --launchpad-id your-launchpad-id \
+  --build-openconnect
+```
+
+## SSH key provisioning
+
+By default the container login user is **`root`** (`--user` overrides it). This is deliberate: LXD's `ubuntu:*` images do *not* auto-create a `ubuntu` user the way public clouds (AWS/GCE/Azure) do - that behavior comes from a cloud datasource-specific default user that LXD's cloud-init datasource doesn't trigger. `root` always exists in any LXD image, so it's the safe default. If you pass `--user someone` for a non-root name that doesn't exist yet, the script creates it (`useradd -m`, added to `sudo` group) before importing keys.
+
+Keys are imported via `ssh-import-id`:
+
+```bash
+--launchpad-id your-launchpad-id   # ssh-import-id lp:your-launchpad-id
+--github-id your-github-id         # ssh-import-id gh:your-github-id (combinable)
+```
+
+If neither flag is given, the script falls back to pushing your local `~/.ssh/id_ed25519.pub` (or `id_rsa.pub`) into the container's `authorized_keys`. If neither a Launchpad/GitHub id nor a local pubkey is available, it prints a warning and you can import manually:
+
+```bash
+# root (default)
+lxc exec vpn-example-anyconnect -- ssh-import-id lp:your-launchpad-id
+
+# non-root --user
+lxc exec vpn-example-anyconnect -- sudo -u someone -H ssh-import-id lp:your-launchpad-id
+```
+
+### GlobalProtect
+
+```bash
+./scripts/create-vpn-lxd-container.sh \
+  --name vpn-example-globalprotect \
+  --protocol gp \
+  --gateway vpn.example.com \
+  --routes 10.0.0.0/8 \
+  --build-openconnect
+```
+
+Replace gateway/routes with the real portal and internal subnets when you have them. If portal and gateway URLs differ, put the **portal** in `--gateway` first; adjust `/etc/vpn-client.env` after testing.
+
+### OpenVPN
+
+```bash
+./scripts/create-vpn-lxd-container.sh \
+  --name vpn-example-openvpn \
+  --protocol openvpn \
+  --ovpn /path/to/profile.ovpn \
+  --routes 10.20.0.0/24
+```
+
+The script copies the `.ovpn` (and referenced cert/key files next to it, if embedded paths are relative and present) into the container at `/etc/openvpn/client/client.ovpn`.
+
+If the profile needs a separate user-pass file:
+
+```bash
+lxc file push userpass.txt vpn-example-openvpn/etc/openvpn/client/userpass.txt
+lxc exec vpn-example-openvpn -- bash -lc 'echo "auth-user-pass /etc/openvpn/client/userpass.txt" >> /etc/openvpn/client/client.ovpn'
+```
+
+## Daily workflow
+
+### Connect
+
+```bash
+lxc start vpn-example-anyconnect
+lxc exec vpn-example-anyconnect -- connect-vpn
+# anyconnect/gp: username, password, MFA/token prompts
+# openvpn: starts openvpn with the packaged profile
+```
+
+### SSH from host (transparent)
+
+```sshconfig
+# ~/.ssh/config.d/example-config
+Host vpn-example-anyconnect
+  HostName 10.254.2.XX
+  User root
+
+Host internal-host-example
+  HostName 10.10.0.10
+  User remote-user
+  ProxyJump vpn-example-anyconnect
+```
+
+Multi-hop chains (e.g. container -> internal jumphost -> final target) need each intermediate host to declare its own `ProxyJump` pointing at the previous hop - `ProxyJump` is not transitive across unrelated `Host` blocks unless each one chains to the next.
+
+### Occasional HTTP/HTTPS
+
+```bash
+ssh -D 11080 -N vpn-example-anyconnect
+curl --socks5-hostname 127.0.0.1:11080 http://internal.example/
+```
+
+### Disconnect / stop
+
+```bash
+lxc exec vpn-example-anyconnect -- disconnect-vpn
+lxc stop vpn-example-anyconnect
+```
+
+## Split routes
+
+`connect-vpn` keeps the container default route on `eth0` and only adds `--routes` via the VPN interface. Edit later:
+
+```bash
+lxc exec vpn-example-anyconnect -- nano /etc/vpn-client.env
+# VPN_ROUTES=10.10.0.0/24,10.20.0.0/24
+```
+
+## Protocol-specific notes
+
+### anyconnect
+
+- Keep any group path in the gateway URL if the server requires it.
+- Prefer interactive CLI inside the container; GUI auth dialogs (e.g. GNOME NetworkManager) can loop on MFA and lock the account.
+- openconnect **9.21+** may be required for updated Cisco ASA/Firepower gateways (older versions can POST to the wrong path and get a 404).
+
+### gp (GlobalProtect)
+
+- `openconnect --protocol=gp`.
+- Some portals need `--usergroup=` or a separate gateway cookie flow; test with:
+  ```bash
+  lxc exec vpn-example-globalprotect -- openconnect --protocol=gp -v <portal>
+  ```
+- Same split-route approach as anyconnect after the tunnel is up.
+
+### openvpn
+
+- Prefer a single exported `.ovpn` from the server admin.
+- Store secrets only inside the container (`/etc/openvpn/client/`), mode `600`.
+- If the server pushes `redirect-gateway` and you still want split-tunnel, `connect-vpn` adds explicit routes and can ignore the pulled default route via `--route-nopull` when `VPN_ROUTE_NOPULL=1` (default for this framework).
+
+## Do not mix with host VPN clients
+
+```bash
+lxc stop vpn-example-anyconnect vpn-example-globalprotect vpn-example-openvpn 2>/dev/null || true
+nmcli connection down <host-vpn-profile> 2>/dev/null || true
+sudo ip link delete vpn0 2>/dev/null || true
+sudo systemctl restart vpnagentd 2>/dev/null || true
+```
+
+## Cloning / new project
+
+```bash
+lxc stop vpn-example-anyconnect
+lxc publish vpn-example-anyconnect --alias vpn-client-template
+lxc launch vpn-client-template vpn-newproject
+lxc exec vpn-newproject -- nano /etc/vpn-client.env
+```
+
+Or re-run `create-vpn-lxd-container.sh` with a new `--name` / `--protocol`.
+
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| cannot create tun | `lxc config set vpn-X security.privileged true` + restart |
+| Cisco/ASA auth 404 on `/` | rebuild openconnect (`--build-openconnect`) |
+| MFA/token login failed before token prompt | account lockout - wait / ask the VPN provider's IT |
+| GlobalProtect stuck on portal | confirm portal vs gateway URL; try `-v` |
+| OpenVPN connects but no internal access | subnet missing from `VPN_ROUTES`; or server pushes a different topology |
+| SSH timeout to internal host | VPN up? `lxc exec vpn-X -- ip route` |
+| host DNS/routes broken | VPN was started on the host - stop it and delete leftover `vpn0` |
+
+## Files
+
+- Guide: `docs/lxd-vpn-client-containers.md`
+- Script: `scripts/create-vpn-lxd-container.sh`

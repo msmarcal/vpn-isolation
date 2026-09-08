@@ -1,0 +1,16 @@
+# Never commit secrets
+*.ovpn
+*userpass*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+.env
+*.env
+credentials*
+secrets*
+
+# OS / editor cruft
+.DS_Store
+*.swp

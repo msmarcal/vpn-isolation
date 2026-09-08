@@ -35,7 +35,7 @@ Full guide: [`docs/lxd-vpn-client-containers.md`](docs/lxd-vpn-client-containers
 | Palo Alto GlobalProtect | `--protocol gp` |
 | OpenVPN | `--protocol openvpn --ovpn <file>` |
 
-New VPNs/protocols: add a new container with the matching template; document any new quirks in `docs/lxd-vpn-client-containers.md`.
+New VPNs/protocols: the script is plugin-based - drop a new `scripts/lib/protocol-<name>.sh` implementing the small contract described in [`docs/adding-a-protocol.md`](docs/adding-a-protocol.md). No changes to the orchestrator are needed.
 
 ## Repo layout
 
@@ -43,9 +43,15 @@ New VPNs/protocols: add a new container with the matching template; document any
 customer-vpn-isolation/
 ├── README.md
 ├── docs/
-│   └── lxd-vpn-client-containers.md   # full setup + troubleshooting guide
+│   ├── lxd-vpn-client-containers.md   # full setup + troubleshooting guide
+│   └── adding-a-protocol.md           # plugin contract for new VPN protocols
 └── scripts/
-    └── create-vpn-lxd-container.sh    # container creation / connect-vpn / disconnect-vpn installer
+    ├── create-vpn-lxd-container.sh    # orchestrator: LXD profile/launch, dispatch to protocol libs
+    └── lib/
+        ├── common.sh                  # shared helpers (split routes, interface wait)
+        ├── protocol-anyconnect.sh     # Cisco AnyConnect (openconnect)
+        ├── protocol-gp.sh             # Palo Alto GlobalProtect (openconnect)
+        └── protocol-openvpn.sh        # OpenVPN (.ovpn profile)
 ```
 
 ## Security notes

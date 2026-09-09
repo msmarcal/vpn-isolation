@@ -23,7 +23,8 @@ EOF
 }
 
 # proto_write_env_interface: override the default VPN_INTERFACE for this protocol.
-# PPP interfaces must be named pppN (kernel rejects vpn0 with ENODEV).
+# PPP interfaces are always named ppp0, ppp1, etc by the kernel - we don't control
+# the name (and --ifname is broken in containers anyway).
 proto_write_env_interface() { echo "ppp0"; }
 
 # openfortivpn notes:
@@ -32,8 +33,9 @@ proto_write_env_interface() { echo "ppp0"; }
 #   model of this framework - credentials should be ephemeral/interactive).
 # - Does not daemonize natively; using nohup + background (&) is the cleanest
 #   workaround that keeps the VPN running after connect-vpn exits.
-# - PPP interfaces must be named pppN (vpn0 is rejected by the kernel with
-#   ENODEV). We use ppp0 as the target interface name.
+# - Do NOT use --ifname: in LXD containers it fails with ENODEV (error 19)
+#   when trying to rename the PPP interface. The kernel always names PPP
+#   interfaces ppp0, ppp1, etc - we just wait for whatever appears.
 # - OTP/2FA: if the gateway requires it, openfortivpn prompts for it after the
 #   password prompt (completely interactive, can't pre-populate).
 proto_connect_snippet() {
@@ -54,7 +56,6 @@ proto_connect() {
   
   FORTI_ARGS=(
     "${VPN_GATEWAY}:${VPN_FORTI_PORT:-443}"
-    --ifname=ppp0
   )
   
   [[ -n "$VPN_FORTI_USER" ]] && FORTI_ARGS+=(--username="$VPN_FORTI_USER")
@@ -67,18 +68,26 @@ proto_connect() {
   FORTI_PID=$!
   echo "openfortivpn started (PID $FORTI_PID), waiting for interface..."
   
-  # Wait longer than usual - FortiSSL auth can be slow with 2FA
-  NEW_IFACE="$(wait_for_iface ppp0)" || {
-    echo "ERROR: tunnel interface did not appear (auth failed?). Last log lines:" >&2
+  # Wait for any PPP interface to appear (kernel assigns ppp0, ppp1, etc)
+  local i
+  NEW_IFACE=""
+  for i in $(seq 1 60); do
+    NEW_IFACE="$(ip -o link show | awk -F': ' '{print $2}' | grep '^ppp' | head -1)"
+    [[ -n "$NEW_IFACE" ]] && break
+    sleep 1
+  done
+  
+  if [[ -z "$NEW_IFACE" ]]; then
+    echo "ERROR: PPP interface did not appear (auth failed?). Last log lines:" >&2
     sudo tail -n 30 /var/log/openfortivpn.log >&2 || true
-    # Try to kill the hung process
     sudo kill "$FORTI_PID" 2>/dev/null || true
     exit 1
-  }
+  fi
+  
   VPN_INTERFACE="$NEW_IFACE"
   apply_split_routes "$VPN_ROUTES" "$VPN_INTERFACE"
   
-  echo "FortiSSL VPN connected. openfortivpn running in background (PID $FORTI_PID)."
+  echo "FortiSSL VPN connected on ${VPN_INTERFACE}. openfortivpn running in background (PID $FORTI_PID)."
   echo "Logs: sudo tail -f /var/log/openfortivpn.log"
 }
 EOF

@@ -119,12 +119,15 @@ lxc exec vpn-example-openvpn -- bash -lc 'echo "auth-user-pass /etc/openvpn/clie
   --name vpn-example-fortissl \
   --protocol fortissl \
   --gateway vpn.example.com \
-  --routes 10.30.0.0/24
+  --routes 10.30.0.0/24 \
+  --forti-user your-username
 ```
 
 Uses `openfortivpn` (open-source FortiGate SSL VPN client). **Password is prompted interactively** - run `lxc exec -t vpn-example-fortissl -- connect-vpn` (the `-t` flag is important, otherwise the TTY-less prompt will fail). If the gateway requires OTP/2FA, openfortivpn will prompt for it after the password prompt.
 
 No certificate/key files to push (FortiSSL VPN authenticates with username/password only, like the Cisco AnyConnect case). The gateway port defaults to 443; override by setting `VPN_FORTI_PORT` in the container's `/etc/vpn-client.env` after creation if needed.
+
+**Note:** The LXD profile automatically includes `/dev/ppp` (mode 0666) which `openfortivpn` requires to create the PPP tunnel interface. If you get "Couldn't open the /dev/ppp device" errors, verify the device is present with `lxc exec <container> -- ls -la /dev/ppp`.
 
 ## Daily workflow
 

@@ -21,6 +21,7 @@ cd vpn-isolation
   --name vpn-example-anyconnect --protocol anyconnect \
   --gateway vpn.example.com/group-path \
   --routes 10.10.0.0/24 --dns-domain internal.example.com \
+  --launchpad-id your-launchpad-id \
   --build-openconnect
 ```
 

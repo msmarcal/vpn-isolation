@@ -12,7 +12,7 @@ proto_validate_args() {
 
 proto_needs_build_openconnect() { echo 0; }
 
-proto_apt_packages() { echo "openfortivpn"; }
+proto_apt_packages() { echo "openfortivpn screen"; }
 
 proto_write_env_extra() {
   cat <<EOF
@@ -52,9 +52,9 @@ proto_connect() {
   
   echo "Connecting FortiSSL VPN to ${VPN_GATEWAY}:${VPN_FORTI_PORT:-443}"
   
-  # Prompt for password BEFORE backgrounding (background processes lose TTY)
+  # Prompt for password BEFORE starting screen session
   if [[ -n "$VPN_FORTI_USER" ]]; then
-    read -s -p "VPN password for ${VPN_FORTI_USER}@<REDACTED_SECRET>: " VPN_PASSWORD
+    read -s -p "VPN password for ${VPN_FORTI_USER}: " VPN_PASSWORD
     echo
   else
     read -s -p "VPN password: " VPN_PASSWORD
@@ -76,12 +76,13 @@ proto_connect() {
   # Add OTP if provided
   [[ -n "$VPN_OTP" ]] && FORTI_ARGS+=(--otp="${VPN_OTP}")
   
-  # Run in background via nohup (openfortivpn doesn't have native daemon mode)
-  sudo nohup openfortivpn "${FORTI_ARGS[@]}" \
-    > /var/log/openfortivpn.log 2>&1 &
+  # Use screen to maintain persistent session (openfortivpn requires TTY)
+  # -dmS: detached, create new session with name
+  # -L: enable logging to screenlog.0
+  sudo screen -dmS vpn-session -L -Logfile /var/log/openfortivpn.log \
+    openfortivpn "${FORTI_ARGS[@]}"
   
-  FORTI_PID=$!
-  echo "openfortivpn started (PID $FORTI_PID), waiting for interface..."
+  echo "openfortivpn started in screen session, waiting for interface..."
   
   # Wait for any PPP interface to appear (kernel assigns ppp0, ppp1, etc)
   local i
@@ -95,14 +96,15 @@ proto_connect() {
   if [[ -z "$NEW_IFACE" ]]; then
     echo "ERROR: PPP interface did not appear (auth failed?). Last log lines:" >&2
     sudo tail -n 30 /var/log/openfortivpn.log >&2 || true
-    sudo kill "$FORTI_PID" 2>/dev/null || true
+    sudo screen -S vpn-session -X quit 2>/dev/null || true
     exit 1
   fi
   
   VPN_INTERFACE="$NEW_IFACE"
   apply_split_routes "$VPN_ROUTES" "$VPN_INTERFACE"
   
-  echo "FortiSSL VPN connected on ${VPN_INTERFACE}. openfortivpn running in background (PID $FORTI_PID)."
+  echo "FortiSSL VPN connected on ${VPN_INTERFACE}."
+  echo "Screen session: sudo screen -r vpn-session"
   echo "Logs: sudo tail -f /var/log/openfortivpn.log"
 }
 EOF

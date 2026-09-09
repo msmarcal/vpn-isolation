@@ -326,7 +326,11 @@ fi
 
 if pgrep -x openfortivpn >/dev/null 2>&1; then
   echo "Stopping openfortivpn..."
-  sudo pkill -TERM openfortivpn || true
+  # Kill screen session first (cleaner)
+  sudo screen -S vpn-session -X quit 2>/dev/null || true
+  sleep 1
+  # Fallback: kill any remaining openfortivpn processes
+  sudo pkill -TERM openfortivpn 2>/dev/null || true
   sleep 1
   sudo pkill -KILL openfortivpn 2>/dev/null || true
 fi

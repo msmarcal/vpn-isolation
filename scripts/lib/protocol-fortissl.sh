@@ -43,7 +43,7 @@ proto_connect_snippet() {
 proto_connect() {
   [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; exit 1; }
   
-  # Require TTY - openfortivpn prompts for password interactively
+  # Require TTY - openfortivpn needs interactive password entry
   if [[ ! -t 0 ]]; then
     echo "ERROR: openfortivpn requires interactive password entry (TTY)." >&2
     echo "       Run with: lxc exec -t <container> -- connect-vpn" >&2
@@ -51,17 +51,32 @@ proto_connect() {
   fi
   
   echo "Connecting FortiSSL VPN to ${VPN_GATEWAY}:${VPN_FORTI_PORT:-443}"
-  echo "Password (and OTP/2FA if required) will be prompted interactively."
-  echo
+  
+  # Prompt for password BEFORE backgrounding (background processes lose TTY)
+  if [[ -n "$VPN_FORTI_USER" ]]; then
+    read -s -p "VPN password for ${VPN_FORTI_USER}@<REDACTED_SECRET>: " VPN_PASSWORD
+    echo
+  else
+    read -s -p "VPN password: " VPN_PASSWORD
+    echo
+  fi
+  
+  # If OTP is configured, prompt for it too
+  VPN_OTP="${VPN_FORTI_OTP:-}"
+  if [[ -n "$VPN_FORTI_OTP_REQUIRED" ]]; then
+    read -p "OTP/2FA token: " VPN_OTP
+  fi
   
   FORTI_ARGS=(
     "${VPN_GATEWAY}:${VPN_FORTI_PORT:-443}"
+    --username="${VPN_FORTI_USER:-$USER}"
+    --password="${VPN_PASSWORD}"
   )
   
-  [[ -n "$VPN_FORTI_USER" ]] && FORTI_ARGS+=(--username="$VPN_FORTI_USER")
+  # Add OTP if provided
+  [[ -n "$VPN_OTP" ]] && FORTI_ARGS+=(--otp="${VPN_OTP}")
   
   # Run in background via nohup (openfortivpn doesn't have native daemon mode)
-  # Note: password prompt goes to stderr, so redirect stderr to the log too
   sudo nohup openfortivpn "${FORTI_ARGS[@]}" \
     > /var/log/openfortivpn.log 2>&1 &
   

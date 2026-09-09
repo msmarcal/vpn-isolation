@@ -270,7 +270,7 @@ HEADER
   proto_connect_snippet
   cat <<'RUNNER'
 
-if pgrep -x openconnect >/dev/null 2>&1 || pgrep -x openvpn >/dev/null 2>&1; then
+if pgrep -x openconnect >/dev/null 2>&1 || pgrep -x openvpn >/dev/null 2>&1 || pgrep -x openfortivpn >/dev/null 2>&1; then
   echo "A VPN client is already running. Run disconnect-vpn first." >&2
   exit 1
 fi
@@ -311,7 +311,14 @@ if pgrep -x openvpn >/dev/null 2>&1; then
   sudo pkill -KILL openvpn 2>/dev/null || true
 fi
 
-for iface in "$VPN_INTERFACE" vpn0 tun0; do
+if pgrep -x openfortivpn >/dev/null 2>&1; then
+  echo "Stopping openfortivpn..."
+  sudo pkill -TERM openfortivpn || true
+  sleep 1
+  sudo pkill -KILL openfortivpn 2>/dev/null || true
+fi
+
+for iface in "$VPN_INTERFACE" vpn0 tun0 ppp0; do
   if ip link show "$iface" >/dev/null 2>&1; then
     echo "Deleting $iface..."
     sudo ip link set "$iface" down 2>/dev/null || true

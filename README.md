@@ -34,6 +34,7 @@ Full guide: [`docs/lxd-vpn-client-containers.md`](docs/lxd-vpn-client-containers
 | Cisco AnyConnect (with optional MFA) | `--protocol anyconnect` |
 | Palo Alto GlobalProtect | `--protocol gp` |
 | OpenVPN | `--protocol openvpn --ovpn <file>` |
+| FortiGate SSL VPN | `--protocol fortissl` |
 
 New VPNs/protocols: the script is plugin-based - drop a new `scripts/lib/protocol-<name>.sh` implementing the small contract described in [`docs/adding-a-protocol.md`](docs/adding-a-protocol.md). No changes to the orchestrator are needed.
 
@@ -51,7 +52,8 @@ vpn-isolation/
         ├── common.sh                  # shared helpers (split routes, interface wait)
         ├── protocol-anyconnect.sh     # Cisco AnyConnect (openconnect)
         ├── protocol-gp.sh             # Palo Alto GlobalProtect (openconnect)
-        └── protocol-openvpn.sh        # OpenVPN (.ovpn profile)
+        ├── protocol-openvpn.sh        # OpenVPN (.ovpn profile)
+        └── protocol-fortissl.sh       # FortiGate SSL VPN (openfortivpn)
 ```
 
 ## Security notes

@@ -35,13 +35,22 @@ proto_connect_snippet() {
   cat <<'EOF'
 proto_connect() {
   [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; exit 1; }
+  
+  # Require TTY - openfortivpn prompts for password interactively
+  if [[ ! -t 0 && -z "$VPN_FORTI_USER" ]]; then
+    echo "ERROR: openfortivpn requires interactive password entry." >&2
+    echo "       Run with: lxc exec -t $0 -- connect-vpn" >&2
+    echo "       Or set VPN_FORTI_USER in /etc/vpn-client.env to skip username prompt." >&2
+    exit 1
+  fi
+  
   echo "Connecting FortiSSL VPN to ${VPN_GATEWAY}:${VPN_FORTI_PORT:-443}"
   echo "Password (and OTP/2FA if required) will be prompted interactively."
   echo
   
   FORTI_ARGS=(
-    "$VPN_GATEWAY:${VPN_FORTI_PORT:-443}"
-    --pppd-ifname="$VPN_INTERFACE"
+    "${VPN_GATEWAY}:${VPN_FORTI_PORT:-443}"
+    --ifname="$VPN_INTERFACE"
   )
   
   [[ -n "$VPN_FORTI_USER" ]] && FORTI_ARGS+=(--username="$VPN_FORTI_USER")

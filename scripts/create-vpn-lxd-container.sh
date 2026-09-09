@@ -61,6 +61,7 @@ OPENCONNECT_TAG="v9.21"
 ROUTE_NOPULL=1
 LAUNCHPAD_ID=""
 GITHUB_ID=""
+FORTI_USER=""
 
 usage() {
   cat <<EOF
@@ -88,6 +89,7 @@ Optional:
   --no-route-nopull        For openvpn: allow server-pushed default route
   --launchpad-id ID        Import SSH keys via 'ssh-import-id lp:ID' (preferred)
   --github-id ID           Import SSH keys via 'ssh-import-id gh:ID' (combinable with --launchpad-id)
+  --forti-user USER        For fortissl: FortiGate SSL VPN username (stored in /etc/vpn-client.env)
   -h, --help               Show this help
 
 Adding a new protocol: see docs/adding-a-protocol.md - no changes to this
@@ -112,6 +114,7 @@ while [[ $# -gt 0 ]]; do
     --no-route-nopull) ROUTE_NOPULL=0; shift ;;
     --launchpad-id) LAUNCHPAD_ID="${2:-}"; shift 2 ;;
     --github-id) GITHUB_ID="${2:-}"; shift 2 ;;
+    --forti-user) FORTI_USER="${2:-}"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "Unknown arg: $1" >&2; usage ;;
   esac

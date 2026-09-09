@@ -189,7 +189,7 @@ lxc stop vpn-example-anyconnect
 `connect-vpn` keeps the container default route on `eth0` and only adds `--routes` via the VPN interface. Edit later:
 
 ```bash
-lxc exec vpn-example-anyconnect -- nano /etc/vpn-client.env
+lxc exec vpn-example-anyconnect -- vim /etc/vpn-client.env
 # VPN_ROUTES=10.10.0.0/24,10.20.0.0/24
 ```
 
@@ -231,7 +231,7 @@ sudo systemctl restart vpnagentd 2>/dev/null || true
 lxc stop vpn-example-anyconnect
 lxc publish vpn-example-anyconnect --alias vpn-client-template
 lxc launch vpn-client-template vpn-newproject
-lxc exec vpn-newproject -- nano /etc/vpn-client.env
+lxc exec vpn-newproject -- vim /etc/vpn-client.env
 ```
 
 Or re-run `create-vpn-lxd-container.sh` with a new `--name` / `--protocol`.

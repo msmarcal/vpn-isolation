@@ -206,7 +206,7 @@ echo "==> Installing base packages"
 lxc exec "$NAME" -- apt-get update -qq
 lxc exec --env DEBIAN_FRONTEND=noninteractive "$NAME" -- apt-get install -y -qq \
   iproute2 iptables curl ca-certificates openssh-client openssh-server \
-  iputils-ping dnsutils nano
+  iputils-ping dnsutils vim
 
 # shellcheck disable=SC2046
 lxc exec --env DEBIAN_FRONTEND=noninteractive "$NAME" -- apt-get install -y -qq $(proto_apt_packages)

@@ -25,7 +25,7 @@ proto_needs_build_openconnect() { echo 0; }
 
 # Print (stdout) a space-separated list of extra apt packages needed inside
 # the container for this protocol, on top of the always-installed base set
-# (iproute2, iptables, curl, openssh-*, dnsutils, nano).
+# (iproute2, iptables, curl, openssh-*, dnsutils, vim).
 proto_apt_packages() { echo "some-client-package"; }
 
 # Print (stdout) extra KEY=VALUE lines to append to the container's

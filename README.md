@@ -20,10 +20,12 @@ cd vpn-isolation
 ./scripts/create-vpn-lxd-container.sh \
   --name vpn-example-anyconnect --protocol anyconnect \
   --gateway vpn.example.com/group-path \
-  --routes 10.10.0.0/24 --dns-domain internal.example.com \
+  --routes 10.10.0.0/24,10.20.0.0/16 --dns-domain internal.example.com \
   --launchpad-id your-launchpad-id \
   --build-openconnect
 ```
+
+**`--routes` accepts multiple networks** as a comma-separated list (no spaces). These become split routes inside the container - only traffic to these subnets goes through the VPN; everything else uses your normal connection. Edit later in `/etc/vpn-client.env` inside the container if needed.
 
 Full guide: [`docs/lxd-vpn-client-containers.md`](docs/lxd-vpn-client-containers.md)
 

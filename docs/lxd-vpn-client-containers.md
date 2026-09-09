@@ -9,6 +9,7 @@ Isolate corporate VPNs inside LXD containers so they never touch the host's rout
 | Cisco AnyConnect / ASA-Firepower with SAML or token MFA | Cisco AnyConnect (openconnect) | `openconnect --protocol=anyconnect` | Gateway path matters (e.g. a group-specific path). Need openconnect **9.21+** on updated ASA/Firepower. Prefer the CLI over GUI auth dialogs. |
 | Palo Alto GlobalProtect | GlobalProtect (openconnect) | `openconnect --protocol=gp` | Same openconnect binary, different protocol. Portal vs gateway URL may differ - confirm with the vendor's portal docs. |
 | OpenVPN (server-issued profile) | OpenVPN | `openvpn` + `.ovpn` profile (+ optional auth user-pass / certs) | Usually a single `.ovpn` export from the server admin. Keep certs/keys only inside the container. |
+| FortiGate SSL VPN | FortiSSL VPN | `openfortivpn` | Gateway + username/password, often with OTP/2FA. Password is prompted interactively; no good way to pre-supply it without storing plaintext credentials (security risk). |
 
 Add a new container with the matching `--protocol` template for any new VPN. If a VPN **mandates** a proprietary native client with GUI/HostScan/posture-check requirements, use a VM instead of a container.
 
@@ -23,6 +24,7 @@ Host (laptop)
 ├── lxc: vpn-example-anyconnect     # openconnect anyconnect
 ├── lxc: vpn-example-globalprotect  # openconnect gp
 ├── lxc: vpn-example-openvpn        # openvpn + .ovpn profile
+├── lxc: vpn-example-fortissl       # openfortivpn (FortiGate SSL VPN)
 └── (rare) VM                       # only if a native client is mandatory
 ```
 
@@ -109,6 +111,20 @@ If the profile needs a separate user-pass file:
 lxc file push userpass.txt vpn-example-openvpn/etc/openvpn/client/userpass.txt
 lxc exec vpn-example-openvpn -- bash -lc 'echo "auth-user-pass /etc/openvpn/client/userpass.txt" >> /etc/openvpn/client/client.ovpn'
 ```
+
+### FortiGate SSL VPN
+
+```bash
+./scripts/create-vpn-lxd-container.sh \
+  --name vpn-example-fortissl \
+  --protocol fortissl \
+  --gateway vpn.example.com \
+  --routes 10.30.0.0/24
+```
+
+Uses `openfortivpn` (open-source FortiGate SSL VPN client). **Password is prompted interactively** - run `lxc exec -t vpn-example-fortissl -- connect-vpn` (the `-t` flag is important, otherwise the TTY-less prompt will fail). If the gateway requires OTP/2FA, openfortivpn will prompt for it after the password prompt.
+
+No certificate/key files to push (FortiSSL VPN authenticates with username/password only, like the Cisco AnyConnect case). The gateway port defaults to 443; override by setting `VPN_FORTI_PORT` in the container's `/etc/vpn-client.env` after creation if needed.
 
 ## Daily workflow
 

@@ -22,13 +22,18 @@ VPN_FORTI_PORT=${FORTI_PORT:-443}
 EOF
 }
 
+# proto_write_env_interface: override the default VPN_INTERFACE for this protocol.
+# PPP interfaces must be named pppN (kernel rejects vpn0 with ENODEV).
+proto_write_env_interface() { echo "ppp0"; }
+
 # openfortivpn notes:
 # - Prompts for password interactively by default (no good way around it without
 #   storing plaintext password in env or on disk, which violates the security
 #   model of this framework - credentials should be ephemeral/interactive).
 # - Does not daemonize natively; using nohup + background (&) is the cleanest
 #   workaround that keeps the VPN running after connect-vpn exits.
-# - Creates ppp0 interface by default (overridable via --pppd-ifname).
+# - PPP interfaces must be named pppN (vpn0 is rejected by the kernel with
+#   ENODEV). We use ppp0 as the target interface name.
 # - OTP/2FA: if the gateway requires it, openfortivpn prompts for it after the
 #   password prompt (completely interactive, can't pre-populate).
 proto_connect_snippet() {
@@ -37,10 +42,9 @@ proto_connect() {
   [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; exit 1; }
   
   # Require TTY - openfortivpn prompts for password interactively
-  if [[ ! -t 0 && -z "$VPN_FORTI_USER" ]]; then
-    echo "ERROR: openfortivpn requires interactive password entry." >&2
-    echo "       Run with: lxc exec -t $0 -- connect-vpn" >&2
-    echo "       Or set VPN_FORTI_USER in /etc/vpn-client.env to skip username prompt." >&2
+  if [[ ! -t 0 ]]; then
+    echo "ERROR: openfortivpn requires interactive password entry (TTY)." >&2
+    echo "       Run with: lxc exec -t <container> -- connect-vpn" >&2
     exit 1
   fi
   
@@ -50,12 +54,13 @@ proto_connect() {
   
   FORTI_ARGS=(
     "${VPN_GATEWAY}:${VPN_FORTI_PORT:-443}"
-    --ifname="$VPN_INTERFACE"
+    --ifname=ppp0
   )
   
   [[ -n "$VPN_FORTI_USER" ]] && FORTI_ARGS+=(--username="$VPN_FORTI_USER")
   
   # Run in background via nohup (openfortivpn doesn't have native daemon mode)
+  # Note: password prompt goes to stderr, so redirect stderr to the log too
   sudo nohup openfortivpn "${FORTI_ARGS[@]}" \
     > /var/log/openfortivpn.log 2>&1 &
   
@@ -63,7 +68,7 @@ proto_connect() {
   echo "openfortivpn started (PID $FORTI_PID), waiting for interface..."
   
   # Wait longer than usual - FortiSSL auth can be slow with 2FA
-  NEW_IFACE="$(wait_for_iface "$VPN_INTERFACE" ppp0)" || {
+  NEW_IFACE="$(wait_for_iface ppp0)" || {
     echo "ERROR: tunnel interface did not appear (auth failed?). Last log lines:" >&2
     sudo tail -n 30 /var/log/openfortivpn.log >&2 || true
     # Try to kill the hung process

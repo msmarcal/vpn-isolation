@@ -234,12 +234,17 @@ fi
 
 echo "==> Writing /etc/vpn-client.env"
 ENV_EXTRA="$(proto_write_env_extra)"
+# Allow protocol to override the default interface name (e.g. fortissl needs ppp0)
+VPN_IFACE="vpn0"
+if declare -f proto_write_env_interface >/dev/null 2>&1; then
+  VPN_IFACE="$(proto_write_env_interface)"
+fi
 lxc exec "$NAME" -- bash -lc "cat > /etc/vpn-client.env <<EOF
 # Managed by create-vpn-lxd-container.sh
 VPN_PROTOCOL=${PROTOCOL}
 VPN_ROUTES=${ROUTES}
 VPN_DNS_DOMAIN=${DNS_DOMAIN}
-VPN_INTERFACE=vpn0
+VPN_INTERFACE=${VPN_IFACE}
 ${ENV_EXTRA}
 EOF
 chmod 644 /etc/vpn-client.env

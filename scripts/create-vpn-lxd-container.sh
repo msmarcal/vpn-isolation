@@ -158,6 +158,11 @@ if ! lxc profile device get "$PROFILE" tun type >/dev/null 2>&1; then
   lxc profile device add "$PROFILE" tun unix-char path=/dev/net/tun
 fi
 
+# PPP device required for FortiSSL VPN (openfortivpn uses pppd)
+if ! lxc profile device get "$PROFILE" ppp type >/dev/null 2>&1; then
+  lxc profile device add "$PROFILE" ppp unix-char path=/dev/ppp mode=0666
+fi
+
 lxc profile set "$PROFILE" security.nesting true >/dev/null
 
 if lxc info "$NAME" >/dev/null 2>&1; then

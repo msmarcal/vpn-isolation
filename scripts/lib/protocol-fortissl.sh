@@ -63,7 +63,7 @@ proto_connect() {
   
   # If OTP is configured, prompt for it too
   VPN_OTP="${VPN_FORTI_OTP:-}"
-  if [[ -n "$VPN_FORTI_OTP_REQUIRED" ]]; then
+  if [[ -n "${VPN_FORTI_OTP_REQUIRED:-}" ]]; then
     read -p "OTP/2FA token: " VPN_OTP
   fi
   

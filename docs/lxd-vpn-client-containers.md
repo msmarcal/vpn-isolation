@@ -123,7 +123,15 @@ lxc exec vpn-example-openvpn -- bash -lc 'echo "auth-user-pass /etc/openvpn/clie
   --forti-user your-username
 ```
 
-Uses `openfortivpn` (open-source FortiGate SSL VPN client). **Password is prompted interactively** - run `lxc exec -t vpn-example-fortissl -- connect-vpn` (the `-t` flag is important, otherwise the TTY-less prompt will fail). If the gateway requires OTP/2FA, openfortivpn will prompt for it after the password prompt.
+Uses `openfortivpn` (open-source FortiGate SSL VPN client). **Password is prompted interactively** - run `lxc exec -t vpn-example-fortissl -- connect-vpn` (the `-t` flag is important, otherwise the TTY-less prompt will fail).
+
+**OTP/2FA is opt-in, not auto-detected.** `openfortivpn` runs inside a detached `screen` session (it needs a TTY and cannot daemonize), so it never gets to prompt for anything itself - `connect-vpn` collects the password and token up front and passes them as `--password` / `--otp`. If your gateway requires 2FA, enable the token prompt once, after creation:
+
+```bash
+lxc exec vpn-example-fortissl -- bash -lc 'echo VPN_FORTI_OTP_REQUIRED=1 >> /etc/vpn-client.env'
+```
+
+Without it, a 2FA-protected gateway simply fails to bring up the PPP interface; check `sudo tail -f /var/log/openfortivpn.log` inside the container to confirm.
 
 No certificate/key files to push (FortiSSL VPN authenticates with username/password only, like the Cisco AnyConnect case). The gateway port defaults to 443; override by setting `VPN_FORTI_PORT` in the container's `/etc/vpn-client.env` after creation if needed.
 
@@ -192,6 +200,25 @@ lxc stop vpn-example-anyconnect
 lxc exec vpn-example-anyconnect -- vim /etc/vpn-client.env
 # VPN_ROUTES=10.10.0.0/24,10.20.0.0/24
 ```
+
+## `/etc/vpn-client.env` reference
+
+Written once at creation and sourced by `connect-vpn` / `disconnect-vpn` on every run, so editing it is the supported way to change a container's behavior after the fact. No restart needed - the next `connect-vpn` picks up the new values.
+
+| Key | Set for | Meaning |
+|---|---|---|
+| `VPN_PROTOCOL` | all | Which protocol the container was built for. Informational after creation - changing it does not swap the baked-in `connect-vpn` logic. |
+| `VPN_ROUTES` | all | Comma-separated split routes, no spaces. `auto` asks the protocol to detect server-pushed routes (anyconnect only); empty means no manual routes. |
+| `VPN_DNS_DOMAIN` | all | Informational only - nothing in `connect-vpn` reads it. |
+| `VPN_INTERFACE` | all | Expected tunnel interface. `vpn0` by default, `ppp0` for fortissl. `connect-vpn` overwrites it at runtime with whatever actually appeared. |
+| `VPN_GATEWAY` | anyconnect, gp, fortissl | Portal/gateway host, including any group path for anyconnect. |
+| `VPN_OVPN` | openvpn | Path to the profile inside the container (`/etc/openvpn/client/client.ovpn`). |
+| `VPN_ROUTE_NOPULL` | openvpn | `1` (default) passes `--route-nopull`, ignoring a server-pushed default route. `0` accepts it - full tunnel inside the container. |
+| `VPN_FORTI_USER` | fortissl | Username passed to `openfortivpn`. Falls back to `$USER` if empty. |
+| `VPN_FORTI_PORT` | fortissl | Gateway port, defaults to `443`. |
+| `VPN_FORTI_OTP_REQUIRED` | fortissl | Any non-empty value makes `connect-vpn` prompt for an OTP/2FA token. Empty = no prompt. |
+
+Passwords and tokens are deliberately absent: they are prompted for on every connect and never written to this file.
 
 ## Protocol-specific notes
 

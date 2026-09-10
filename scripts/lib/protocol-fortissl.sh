@@ -19,6 +19,10 @@ proto_write_env_extra() {
 VPN_GATEWAY=${GATEWAY}
 VPN_FORTI_USER=${FORTI_USER:-}
 VPN_FORTI_PORT=${FORTI_PORT:-443}
+# Set to any non-empty value if the gateway requires OTP/2FA. connect-vpn then
+# prompts for the token and passes it to openfortivpn as --otp. Left empty on
+# creation because there is no way to probe the gateway for this beforehand.
+VPN_FORTI_OTP_REQUIRED=
 EOF
 }
 
@@ -28,16 +32,20 @@ EOF
 proto_write_env_interface() { echo "ppp0"; }
 
 # openfortivpn notes:
-# - Prompts for password interactively by default (no good way around it without
-#   storing plaintext password in env or on disk, which violates the security
-#   model of this framework - credentials should be ephemeral/interactive).
-# - Does not daemonize natively; using nohup + background (&) is the cleanest
-#   workaround that keeps the VPN running after connect-vpn exits.
+# - Credentials are collected by connect-vpn itself (read -s), never stored in
+#   /etc/vpn-client.env or on disk - they only ever live in the process
+#   environment for the lifetime of the connection.
+# - Does not daemonize natively and needs a TTY, so it runs inside a detached
+#   `screen` session. That is what keeps the tunnel up after connect-vpn exits;
+#   it also means openfortivpn can no longer prompt for anything itself, which
+#   is why the password and OTP are prompted up front and handed over as
+#   --password / --otp arguments.
+# - OTP/2FA is therefore NOT auto-detected: set VPN_FORTI_OTP_REQUIRED in
+#   /etc/vpn-client.env to make connect-vpn prompt for a token. Without it, a
+#   gateway that demands 2FA just fails to bring up the interface.
 # - Do NOT use --ifname: in LXD containers it fails with ENODEV (error 19)
 #   when trying to rename the PPP interface. The kernel always names PPP
 #   interfaces ppp0, ppp1, etc - we just wait for whatever appears.
-# - OTP/2FA: if the gateway requires it, openfortivpn prompts for it after the
-#   password prompt (completely interactive, can't pre-populate).
 proto_connect_snippet() {
   cat <<'EOF'
 proto_connect() {

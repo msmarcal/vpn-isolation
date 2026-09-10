@@ -66,18 +66,22 @@ FORTI_USER=""
 usage() {
   cat <<EOF
 Usage:
-  create-vpn-lxd-container.sh --name NAME --protocol PROTO --routes CIDRS [options]
+  create-vpn-lxd-container.sh --name NAME --protocol PROTO [options]
 
 Required:
   --name NAME              Container name (e.g. vpn-example-anyconnect)
   --protocol PROTO         One of: ${AVAILABLE_PROTOCOLS[*]}
-  --routes CIDRS           Comma-separated split routes (e.g. 10.1.0.0/16,10.2.0.0/24)
 
 Protocol-specific:
-  --gateway HOST[/path]    Required for anyconnect/gp
+  --gateway HOST[/path]    Required for anyconnect/gp/fortissl
   --ovpn FILE              Required for openvpn (.ovpn profile path on host)
 
 Optional:
+  --routes CIDRS           Comma-separated split routes (e.g. 10.1.0.0/16,10.2.0.0/24).
+                            Defaults to 'auto': ask the protocol to detect the
+                            server-pushed routes after connecting (implemented for
+                            anyconnect; other protocols add no manual routes).
+                            Editable later in /etc/vpn-client.env.
   --dns-domain DOMAIN      Informational / helper default domain
   --user USER              Container login user (default: root - always exists;
                             if set to a non-root user that doesn't exist yet,

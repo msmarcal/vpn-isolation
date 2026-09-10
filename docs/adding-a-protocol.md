@@ -7,8 +7,9 @@ immediately available as `--protocol <name>`.
 
 ## Contract
 
-Create `scripts/lib/protocol-<name>.sh`. It must set two variables and
-define five functions (one optional):
+Create `scripts/lib/protocol-<name>.sh`. It must set two variables and define
+six functions, plus two optional hooks the orchestrator probes for with
+`declare -f` and skips when absent:
 
 ```bash
 PROTO_NAME="<name>"                 # must match the filename suffix
@@ -69,6 +70,14 @@ proto_post_install() {
   local name="$1"
   # lxc file push ...
 }
+
+# OPTIONAL: print (stdout) the value written to VPN_INTERFACE in
+# /etc/vpn-client.env. Omit to accept the default `vpn0`. Define it when the
+# kernel - not your client - picks the interface name, so proto_connect has a
+# sane starting point to poll from (protocol-fortissl.sh returns "ppp0",
+# because PPP interfaces are always named pppN and cannot be renamed inside
+# an LXD container).
+proto_write_env_interface() { echo "ppp0"; }
 ```
 
 ## Reference implementations
@@ -91,12 +100,40 @@ To sanity-check the assembled `connect-vpn` script without `lxc`, source
 `scripts/lib/common.sh` and your new protocol file in a throwaway shell,
 call `proto_connect_snippet`, and run the result through `bash -n`.
 
+## The one place a new client binary DOES need orchestrator changes
+
+Connecting is fully pluggable; **disconnecting is not**. Two spots in
+`scripts/create-vpn-lxd-container.sh` hardcode the set of known client
+binaries, and a protocol introducing a new one has to add itself to both:
+
+1. The "already connected" guard in the generated `connect-vpn` runner -
+   currently `pgrep -x openconnect || pgrep -x openvpn || pgrep -x
+   openfortivpn`. A client missing from this list lets a second `connect-vpn`
+   start on top of a live tunnel.
+2. The generated `disconnect-vpn` - it stops each known client by name and
+   then deletes any leftover `vpn0`/`tun0`/`ppp0` link. A client missing here
+   is simply never stopped, and `disconnect-vpn` will report "VPN down."
+   while the tunnel is still up.
+
+Add your client to both lists, and to the interface loop if your tunnel
+device is named something other than `vpn0`/`tun0`/`ppp0`. If your client
+needs a non-obvious teardown (fortissl, for instance, must first quit its
+`screen` session), put it next to the existing per-client blocks.
+
+Non-root containers need one more line: the sudoers allowlist written for
+`--user` grants NOPASSWD only for the binaries it knows about, so add yours
+if the container is meant to run as anything other than `root`.
+
 ## What you should NOT need to touch
 
-- `scripts/create-vpn-lxd-container.sh` (the orchestrator)
+- The rest of `scripts/create-vpn-lxd-container.sh` - profile setup, launch,
+  package install, env file, SSH provisioning and the `connect-vpn` assembly
+  are all protocol-agnostic.
 - `scripts/lib/common.sh` (shared helpers - only touch if genuinely shared
-  logic is missing, and keep it protocol-agnostic)
+  logic is missing, and keep it protocol-agnostic). Note this file is copied
+  verbatim into the in-container `connect-vpn`, so it must stay self-contained
+  and depend on nothing beyond the base package set.
 
-If you find yourself editing either of those to add a protocol, the contract
-above is probably missing something - open an issue/PR describing the gap
+If you find yourself editing anything beyond the teardown lists above, the
+contract is probably missing something - open an issue/PR describing the gap
 instead of hardcoding a protocol name into the orchestrator.

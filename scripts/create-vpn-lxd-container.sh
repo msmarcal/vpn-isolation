@@ -192,16 +192,42 @@ if ! lxc profile device get "$PROFILE" eth0 type >/dev/null 2>&1; then
   lxc profile device add "$PROFILE" eth0 nic network=lxdbr0 name=eth0
 fi
 
+# /dev/net/tun: every tunnel-based client here (openconnect, openvpn) opens it
+# to create its tun interface. Unprivileged containers do not get it by default.
 if ! lxc profile device get "$PROFILE" tun type >/dev/null 2>&1; then
   lxc profile device add "$PROFILE" tun unix-char path=/dev/net/tun
 fi
 
-# PPP device required for FortiSSL VPN (openfortivpn uses pppd)
+# PPP device required for FortiSSL VPN (openfortivpn uses pppd).
+#
+# mode=0660 (root:root), measured on LXD 5.21.7: root opens the device fine,
+# and connect-vpn always invokes openfortivpn through sudo, so pppd reaches it
+# as root even in a non-root --user container. This used to be 0666, which
+# additionally let any unprivileged process in the container open /dev/ppp -
+# something nothing here needs. Stated explicitly rather than relying on the
+# LXD default, which happens to be 0660 today but is not ours to depend on.
 if ! lxc profile device get "$PROFILE" ppp type >/dev/null 2>&1; then
-  lxc profile device add "$PROFILE" ppp unix-char path=/dev/ppp mode=0666
+  lxc profile device add "$PROFILE" ppp unix-char path=/dev/ppp mode=0660
 fi
 
-lxc profile set "$PROFILE" security.nesting true >/dev/null
+# Correct a profile created by an older revision of this script, which used
+# 0666. Existing containers pick the tighter mode up on their next restart.
+PPP_MODE="$(lxc profile device get "$PROFILE" ppp mode 2>/dev/null || echo "")"
+if [[ -n "$PPP_MODE" && "$PPP_MODE" != "0660" ]]; then
+  echo "    tightening /dev/ppp mode on profile '${PROFILE}': ${PPP_MODE} -> 0660"
+  lxc profile device set "$PROFILE" ppp mode=0660
+fi
+
+# NOTE: security.nesting is deliberately NOT set. It used to be enabled here,
+# but nothing in this setup runs a container inside the container, which is what
+# nesting is for.
+#
+# Verified on LXD 5.21.7 / ubuntu:24.04 with nesting off: the container boots,
+# /dev/net/tun and /dev/ppp both open O_RDWR, a tun interface can be created,
+# addressed and brought up, a split route can be installed on it, and the
+# default route stays on eth0. Not covered by that test: a live tunnel against
+# a real gateway. If a VPN client ever fails here in a way that points at
+# nesting, record the specific failure alongside re-enabling it.
 
 if lxc info "$NAME" >/dev/null 2>&1; then
   echo "ERROR: container '${NAME}' already exists. Delete it first: lxc delete -f ${NAME}" >&2
@@ -246,6 +272,9 @@ lxc exec --env DEBIAN_FRONTEND=noninteractive "$NAME" -- apt-get install -y -qq 
   iproute2 iptables curl ca-certificates openssh-client openssh-server \
   iputils-ping dnsutils vim
 
+# Word splitting on proto_apt_packages is intentional: it prints a space-
+# separated package list that must reach apt-get as separate arguments.
+# Quoting it would pass the whole list as one bogus package name.
 # shellcheck disable=SC2046
 lxc exec --env DEBIAN_FRONTEND=noninteractive "$NAME" -- apt-get install -y -qq $(proto_apt_packages)
 
@@ -267,6 +296,12 @@ if [[ "$BUILD_OPENCONNECT" -eq 1 ]]; then
     make -j\"\$(nproc)\"
     make install
     ldconfig
+    # The build installs into /usr/local/sbin, but the distro package owns
+    # /usr/sbin/openconnect and that is what ends up being run. Move the
+    # packaged binary aside with dpkg-divert (so a later apt upgrade does not
+    # silently restore it) and point /usr/sbin at the freshly built one -
+    # otherwise --build-openconnect appears to succeed while connect-vpn keeps
+    # using the old version this flag exists to escape.
     if [[ -x /usr/sbin/openconnect && ! -L /usr/sbin/openconnect ]]; then
       dpkg-divert --local --rename --divert /usr/sbin/openconnect.dpkg-old /usr/sbin/openconnect || true
       ln -sf /usr/local/sbin/openconnect /usr/sbin/openconnect
@@ -290,6 +325,9 @@ VPN_DNS_DOMAIN=${DNS_DOMAIN}
 VPN_INTERFACE=${VPN_IFACE}
 ${ENV_EXTRA}
 EOF
+# 0644 on purpose: this file is configuration only and never holds a password
+# or token (those are prompted for on every connect). Any protocol that would
+# need a secret in here must not put it in this file.
 chmod 644 /etc/vpn-client.env
 "
 
@@ -334,6 +372,10 @@ HEADER
   proto_connect_snippet
   cat <<'RUNNER'
 
+# HARDCODED CLIENT LIST (1 of 3) - a new protocol must add its client binary
+# here, in disconnect-vpn, and in the sudoers allowlist. A client missing from
+# this guard lets a second connect-vpn start on top of a live tunnel.
+# See docs/adding-a-protocol.md.
 if pgrep -x openconnect >/dev/null 2>&1 || pgrep -x openvpn >/dev/null 2>&1 || pgrep -x openfortivpn >/dev/null 2>&1; then
   echo "A VPN client is already running. Run disconnect-vpn first." >&2
   exit 1
@@ -349,14 +391,30 @@ ip route | grep -E "${VPN_INTERFACE}|$(echo "$VPN_ROUTES" | tr "," "|")" || ip r
 RUNNER
 )"
 
+# connect-vpn is piped in over stdin because its body is assembled here on the
+# host and can contain anything a protocol emits - keeping it out of the
+# command line avoids every quoting problem at once.
 printf '%s\n' "$CONNECT_VPN_BODY" | lxc exec "$NAME" -- bash -c 'cat > /usr/local/bin/connect-vpn && chmod +x /usr/local/bin/connect-vpn'
 
+# disconnect-vpn is fixed text, so it is written with an inline heredoc instead.
+# Read the quoting carefully before editing: the outer bash -lc argument is in
+# single quotes, and '\''EOF'\'' is how a single-quoted EOF is embedded inside
+# it. The quoted heredoc delimiter is what stops $VPN_INTERFACE and friends from
+# expanding HERE on the host - they must survive into the container script and
+# expand at disconnect time. Anything you add below therefore must not contain
+# a literal single quote, which would terminate the outer string.
 lxc exec "$NAME" -- bash -lc 'cat > /usr/local/bin/disconnect-vpn <<'\''EOF'\''
 #!/usr/bin/env bash
 set -euo pipefail
 ENV_FILE=/etc/vpn-client.env
 [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
 VPN_INTERFACE="${VPN_INTERFACE:-vpn0}"
+
+# HARDCODED CLIENT LIST (2 of 3) - see docs/adding-a-protocol.md.
+# One block per known client binary. A protocol whose client is missing here is
+# never stopped, and this script still reports "VPN down." at the end, so the
+# omission looks like success while the tunnel stays up. Each block is a no-op
+# when that client is not running, so adding one is always safe.
 
 if pgrep -x openconnect >/dev/null 2>&1; then
   echo "Stopping openconnect..."
@@ -377,15 +435,22 @@ fi
 
 if pgrep -x openfortivpn >/dev/null 2>&1; then
   echo "Stopping openfortivpn..."
-  # Kill screen session first (cleaner)
+  # Quit the screen session first: openfortivpn runs inside it, so killing the
+  # session lets the client tear the PPP link down on its own terms.
   sudo screen -S vpn-session -X quit 2>/dev/null || true
   sleep 1
-  # Fallback: kill any remaining openfortivpn processes
+  # Fallback for a client that outlived its session, or was started by hand.
   sudo pkill -TERM openfortivpn 2>/dev/null || true
   sleep 1
   sudo pkill -KILL openfortivpn 2>/dev/null || true
 fi
 
+# Sweep up interfaces the clients above left behind - a killed client does not
+# always remove its own link. VPN_INTERFACE covers whatever the container was
+# configured for; the rest are the names the supported clients actually use.
+# Extend this list if a new protocol names its tunnel something else. Deleting
+# a ppp link usually fails because pppd owns it and it disappears with the
+# process, hence the tolerated errors.
 for iface in "$VPN_INTERFACE" vpn0 tun0 ppp0; do
   if ip link show "$iface" >/dev/null 2>&1; then
     echo "Deleting $iface..."
@@ -406,10 +471,11 @@ if [[ "$CONTAINER_USER" != "root" ]]; then
       useradd -m -s /bin/bash '${CONTAINER_USER}'
     fi
     usermod -aG sudo '${CONTAINER_USER}' 2>/dev/null || true
+    # HARDCODED CLIENT LIST (3 of 3) - see docs/adding-a-protocol.md.
     # Every VPN client binary that connect-vpn / disconnect-vpn invoke under
     # sudo has to be listed here, or the helpers stall on a password prompt.
     # A new protocol adds its client (and any wrapper it needs, the way
-    # fortissl needs screen) to this line - see docs/adding-a-protocol.md.
+    # fortissl needs screen) to this line.
     #
     # Deliberately NOT granted: tail. The only sudo tail calls are error-path
     # log dumps guarded with '|| true', so they degrade to no output instead of

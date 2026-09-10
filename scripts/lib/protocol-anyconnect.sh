@@ -44,18 +44,28 @@ proto_connect() {
   echo "Connecting openconnect protocol=anyconnect to ${VPN_GATEWAY}"
   echo "Split routes after connect: ${VPN_ROUTES:-<auto-detect>}"
   echo
+  # -b backgrounds openconnect once authentication succeeds, so connect-vpn can
+  # return while the tunnel stays up. Because it detaches, a failed login shows
+  # up only as a missing interface below, not as a non-zero exit here.
   sudo openconnect \
     --protocol=anyconnect \
     --interface="$VPN_INTERFACE" \
     -b \
     "$VPN_GATEWAY"
+  # openconnect honors --interface when it can, but falls back to tun0; accept
+  # either rather than guessing.
   NEW_IFACE="$(wait_for_iface "$VPN_INTERFACE" tun0)" || {
     echo "ERROR: tunnel interface did not appear (auth failed?)" >&2
     exit 1
   }
   VPN_INTERFACE="$NEW_IFACE"
-  
-  # Auto-detect routes from server if VPN_ROUTES is empty or "auto"
+
+  # Auto-detect routes from the server if VPN_ROUTES is empty or "auto".
+  # There is no separate query for this: openconnect already ran vpnc-script,
+  # which installed the server split-include routes on the tunnel interface, so
+  # reading the routing table back is what "asking the server" amounts to. Only
+  # works for a split-tunnel gateway - a full-tunnel one pushes a default route,
+  # which is filtered out below, leaving nothing to detect.
   if [[ -z "$VPN_ROUTES" || "$VPN_ROUTES" == "auto" ]]; then
     echo "Attempting to auto-detect split-include routes from server..."
     DETECTED_ROUTES="$(ip route show dev "$VPN_INTERFACE" | awk '{print $1}' | grep -v '^default' | tr '\n' ',' | sed 's/,$//')"

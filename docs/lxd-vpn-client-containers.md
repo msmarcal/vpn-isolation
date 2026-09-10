@@ -135,7 +135,14 @@ Without it, a 2FA-protected gateway simply fails to bring up the PPP interface; 
 
 No certificate/key files to push (FortiSSL VPN authenticates with username/password only, like the Cisco AnyConnect case). The gateway port defaults to 443; pass `--forti-port 10443` at creation, or edit `VPN_FORTI_PORT` in the container's `/etc/vpn-client.env` afterwards.
 
-**Note:** The LXD profile automatically includes `/dev/ppp` (mode 0666) which `openfortivpn` requires to create the PPP tunnel interface. If you get "Couldn't open the /dev/ppp device" errors, verify the device is present with `lxc exec <container> -- ls -la /dev/ppp`.
+**Note:** The LXD profile automatically includes `/dev/ppp` (mode 0660, root-owned) which `openfortivpn` requires to create the PPP tunnel interface. `connect-vpn` always invokes the client through `sudo`, so root reaches the device even in a `--user` container. If you get "Couldn't open the /dev/ppp device" errors, verify the device is present with `lxc exec <container> -- ls -la /dev/ppp`.
+
+A profile created by an older revision of the script used mode 0666, which also let unprivileged processes in the container open `/dev/ppp`. Re-running the create script tightens an existing profile to 0660 automatically; containers already using it pick the new mode up on their next restart. To apply it without creating a container:
+
+```bash
+lxc profile device set vpn-client ppp mode=0660
+lxc restart <container>   # per container using the profile
+```
 
 ## Daily workflow
 

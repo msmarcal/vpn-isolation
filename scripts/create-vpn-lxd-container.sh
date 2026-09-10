@@ -120,10 +120,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$NAME" || -z "$PROTOCOL" || -z "$ROUTES" ]]; then
-  echo "ERROR: --name, --protocol and --routes are required." >&2
+if [[ -z "$NAME" || -z "$PROTOCOL" ]]; then
+  echo "ERROR: --name and --protocol are required." >&2
   usage
 fi
+
+# --routes is optional; defaults to "auto" for auto-detection if protocol supports it
+ROUTES="${ROUTES:-auto}"
 
 PROTOCOL_LIB="${LIB_DIR}/protocol-${PROTOCOL}.sh"
 if [[ ! -f "$PROTOCOL_LIB" ]]; then
@@ -427,7 +430,7 @@ Container ready: ${NAME}
   Protocol     : ${PROTOCOL}
   IP on lxdbr0 : ${IP:-<pending - run: lxc list ${NAME}>}
   Gateway/ovpn : ${GATEWAY:-${OVPN}}
-  Split routes : ${ROUTES}
+  Split routes : ${ROUTES:-auto-detect}
   Client       : ${TOOL_VER}
 ============================================================
 

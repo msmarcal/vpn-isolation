@@ -25,7 +25,7 @@ cd vpn-isolation
   --build-openconnect
 ```
 
-**`--routes` accepts multiple networks** as a comma-separated list (no spaces). These become split routes inside the container - only traffic to these subnets goes through the VPN; everything else uses your normal connection. Edit later in `/etc/vpn-client.env` inside the container if needed.
+**`--routes` accepts multiple networks** as a comma-separated list (no spaces). These become split routes inside the container - only traffic to these subnets goes through the VPN; everything else uses your normal connection. If omitted or set to `auto`, the protocol attempts to detect routes from the server response (currently implemented for AnyConnect; other protocols may fallback to no manual routes). Edit later in `/etc/vpn-client.env` inside the container if needed.
 
 Full guide: [`docs/lxd-vpn-client-containers.md`](docs/lxd-vpn-client-containers.md)
 
@@ -66,4 +66,4 @@ vpn-isolation/
 ## Roadmap / open items
 
 - [ ] Optional: `lxc publish` a `vpn-client-template` image after first successful container, to speed up cloning for new projects
-- [ ] Consider auto-detecting split-include routes from server response before falling back to manual `--routes`
+- [x] Auto-detect split-include routes from server response when `--routes` is omitted or `auto` (AnyConnect; other protocols fallback)

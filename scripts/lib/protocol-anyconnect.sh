@@ -37,7 +37,7 @@ proto_connect_snippet() {
 proto_connect() {
   [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; exit 1; }
   echo "Connecting openconnect protocol=anyconnect to ${VPN_GATEWAY}"
-  echo "Split routes after connect: ${VPN_ROUTES:-<none>}"
+  echo "Split routes after connect: ${VPN_ROUTES:-<auto-detect>}"
   echo
   sudo openconnect \
     --protocol=anyconnect \
@@ -49,6 +49,21 @@ proto_connect() {
     exit 1
   }
   VPN_INTERFACE="$NEW_IFACE"
+  
+  # Auto-detect routes from server if VPN_ROUTES is empty or "auto"
+  if [[ -z "$VPN_ROUTES" || "$VPN_ROUTES" == "auto" ]]; then
+    echo "Attempting to auto-detect split-include routes from server..."
+    DETECTED_ROUTES="$(ip route show dev "$VPN_INTERFACE" | awk '{print $1}' | grep -v '^default' | tr '\n' ',' | sed 's/,$//')"
+    if [[ -n "$DETECTED_ROUTES" ]]; then
+      echo "Detected routes from server: $DETECTED_ROUTES"
+      VPN_ROUTES="$DETECTED_ROUTES"
+    else
+      echo "WARNING: No split-include routes detected from server."
+      echo "         You may need to set --routes manually or use full tunnel."
+      VPN_ROUTES=""
+    fi
+  fi
+  
   apply_split_routes "$VPN_ROUTES" "$VPN_INTERFACE"
 }
 EOF

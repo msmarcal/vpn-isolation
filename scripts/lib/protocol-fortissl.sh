@@ -1,6 +1,11 @@
-# lib/protocol-fortissl.sh
+# shellcheck shell=bash
 # FortiGate SSL VPN via openfortivpn (open-source client).
+
+# PROTO_NAME must match this file's name suffix; the orchestrator verifies it.
 PROTO_NAME="fortissl"
+# PROTO_DESC is listed by the orchestrator's --help, which reads it with sed
+# instead of sourcing this file - hence no in-file reference.
+# shellcheck disable=SC2034
 PROTO_DESC="FortiGate SSL VPN (openfortivpn)"
 
 proto_validate_args() {

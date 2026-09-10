@@ -1,6 +1,11 @@
-# lib/protocol-gp.sh
+# shellcheck shell=bash
 # Palo Alto GlobalProtect via openconnect.
+
+# PROTO_NAME must match this file's name suffix; the orchestrator verifies it.
 PROTO_NAME="gp"
+# PROTO_DESC is listed by the orchestrator's --help, which reads it with sed
+# instead of sourcing this file - hence no in-file reference.
+# shellcheck disable=SC2034
 PROTO_DESC="Palo Alto GlobalProtect (openconnect --protocol=gp)"
 
 proto_validate_args() {

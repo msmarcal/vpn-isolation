@@ -1,6 +1,11 @@
-# lib/protocol-anyconnect.sh
+# shellcheck shell=bash
 # Cisco AnyConnect via openconnect.
+
+# PROTO_NAME must match this file's name suffix; the orchestrator verifies it.
 PROTO_NAME="anyconnect"
+# PROTO_DESC is listed by the orchestrator's --help, which reads it with sed
+# instead of sourcing this file - hence no in-file reference.
+# shellcheck disable=SC2034
 PROTO_DESC="Cisco AnyConnect (openconnect --protocol=anyconnect)"
 
 # proto_validate_args: exit 1 with a message if required flags are missing.

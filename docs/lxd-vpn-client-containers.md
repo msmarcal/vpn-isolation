@@ -133,7 +133,7 @@ lxc exec vpn-example-fortissl -- bash -lc 'echo VPN_FORTI_OTP_REQUIRED=1 >> /etc
 
 Without it, a 2FA-protected gateway simply fails to bring up the PPP interface; check `sudo tail -f /var/log/openfortivpn.log` inside the container to confirm.
 
-No certificate/key files to push (FortiSSL VPN authenticates with username/password only, like the Cisco AnyConnect case). The gateway port defaults to 443; override by setting `VPN_FORTI_PORT` in the container's `/etc/vpn-client.env` after creation if needed.
+No certificate/key files to push (FortiSSL VPN authenticates with username/password only, like the Cisco AnyConnect case). The gateway port defaults to 443; pass `--forti-port 10443` at creation, or edit `VPN_FORTI_PORT` in the container's `/etc/vpn-client.env` afterwards.
 
 **Note:** The LXD profile automatically includes `/dev/ppp` (mode 0666) which `openfortivpn` requires to create the PPP tunnel interface. If you get "Couldn't open the /dev/ppp device" errors, verify the device is present with `lxc exec <container> -- ls -la /dev/ppp`.
 
@@ -274,6 +274,10 @@ Or re-run `create-vpn-lxd-container.sh` with a new `--name` / `--protocol`.
 | OpenVPN connects but no internal access | subnet missing from `VPN_ROUTES`; or server pushes a different topology |
 | SSH timeout to internal host | VPN up? `lxc exec vpn-X -- ip route` |
 | host DNS/routes broken | VPN was started on the host - stop it and delete leftover `vpn0` |
+| fortissl: "requires interactive password entry" | missing `-t`: use `lxc exec -t vpn-X -- connect-vpn` |
+| fortissl: PPP interface never appears | wrong password, or 2FA gateway without `VPN_FORTI_OTP_REQUIRED` set - check `sudo tail /var/log/openfortivpn.log` |
+| `connect-vpn` stops at a sudo password prompt | non-root `--user` and the client is missing from `/etc/sudoers.d/vpn-client` |
+| `disconnect-vpn` says "VPN down." but traffic still flows | client not in `disconnect-vpn`'s known list - see docs/adding-a-protocol.md |
 
 ## Files
 

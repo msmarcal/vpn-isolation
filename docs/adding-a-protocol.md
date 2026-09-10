@@ -12,7 +12,12 @@ six functions, plus two optional hooks the orchestrator probes for with
 `declare -f` and skips when absent:
 
 ```bash
-PROTO_NAME="<name>"                 # must match the filename suffix
+# Must match the filename suffix - the orchestrator dispatches on the filename
+# and refuses to run if the two disagree.
+PROTO_NAME="<name>"
+# One line, shown in the protocol list printed by --help. The orchestrator
+# reads it with sed rather than sourcing this file, so keep it a plain
+# double-quoted literal on a single line - no variables, no concatenation.
 PROTO_DESC="Human-readable description"
 
 # Validate required orchestrator globals (GATEWAY, OVPN, etc). Exit 1 with a
@@ -92,13 +97,25 @@ proto_write_env_interface() { echo "ppp0"; }
 ## Testing a new protocol file without a real container
 
 ```bash
-bash -n scripts/lib/protocol-<name>.sh   # syntax check
-./scripts/create-vpn-lxd-container.sh --help   # confirm it's listed under "One of: ..."
+bash -n scripts/lib/protocol-<name>.sh          # syntax check
+shellcheck scripts/lib/protocol-<name>.sh       # optional, but the repo is clean
+./scripts/create-vpn-lxd-container.sh --help    # confirm name + PROTO_DESC are listed
 ```
 
-To sanity-check the assembled `connect-vpn` script without `lxc`, source
-`scripts/lib/common.sh` and your new protocol file in a throwaway shell,
-call `proto_connect_snippet`, and run the result through `bash -n`.
+The `proto_connect_snippet` output is *text* that only gets parsed inside the
+container, so a typo in it survives every check above and only surfaces on a
+real connect. Parse it explicitly:
+
+```bash
+bash -c 'source scripts/lib/protocol-<name>.sh; proto_connect_snippet' | bash -n /dev/stdin
+```
+
+A PROTO_NAME that disagrees with the filename is caught early - the
+orchestrator exits before touching `lxc`, so this is safe to run anywhere:
+
+```bash
+./scripts/create-vpn-lxd-container.sh --name t --protocol <name>
+```
 
 ## The one place a new client binary DOES need orchestrator changes
 
@@ -121,8 +138,10 @@ needs a non-obvious teardown (fortissl, for instance, must first quit its
 `screen` session), put it next to the existing per-client blocks.
 
 Non-root containers need one more line: the sudoers allowlist written for
-`--user` grants NOPASSWD only for the binaries it knows about, so add yours
-if the container is meant to run as anything other than `root`.
+`--user` grants NOPASSWD only for the binaries it knows about, so add yours -
+plus any wrapper you invoke under sudo, the way fortissl needs `screen` - if
+the container is meant to run as anything other than `root`. A binary missing
+from that list makes `connect-vpn` hang on a sudo password prompt.
 
 ## What you should NOT need to touch
 

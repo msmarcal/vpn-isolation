@@ -1,7 +1,18 @@
-# lib/common.sh
-# Shared shell functions sourced by both the orchestrator (create-vpn-lxd-container.sh)
-# and the in-container connect-vpn script. Keep this POSIX-ish bash, no external deps
-# beyond what's installed by the base package set.
+# shellcheck shell=bash
+#
+# Shared VPN helpers.
+#
+# This file is used two ways: sourced directly by the orchestrator
+# (create-vpn-lxd-container.sh) on the host, and COPIED VERBATIM into the
+# generated /usr/local/bin/connect-vpn inside each container. The container
+# never has a copy of this repository, so these functions only exist there
+# because their text was pasted in.
+#
+# That second use is the binding constraint: keep this file self-contained,
+# protocol-agnostic, and free of any dependency beyond the base package set
+# the orchestrator installs (iproute2, iptables, curl, openssh-*, dnsutils).
+# Anything sourced, imported, or shelled out to here must also exist inside
+# every container this repo can build.
 
 # apply_split_routes CIDR_LIST IFACE
 # CIDR_LIST is a comma-separated string (e.g. "10.1.0.0/16,10.2.0.0/24")

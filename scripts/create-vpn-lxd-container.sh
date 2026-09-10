@@ -40,10 +40,17 @@ LIB_DIR="${SCRIPT_DIR}/lib"
 source "${LIB_DIR}/common.sh"
 
 # Discover available protocols from lib/protocol-*.sh (sorted, stable order).
+# Each plugin's PROTO_DESC is extracted with sed rather than by sourcing the
+# file: usage() runs before any protocol lib is sourced, and --help must never
+# execute plugin code just to print a list.
 declare -a AVAILABLE_PROTOCOLS=()
+declare -a PROTOCOL_SUMMARIES=()
 for f in "${LIB_DIR}"/protocol-*.sh; do
   [[ -e "$f" ]] || continue
-  AVAILABLE_PROTOCOLS+=("$(basename "$f" .sh | sed 's/^protocol-//')")
+  proto_name="$(basename "$f" .sh | sed 's/^protocol-//')"
+  proto_desc="$(sed -n 's/^PROTO_DESC="\(.*\)"[[:space:]]*$/\1/p' "$f" | head -1)"
+  AVAILABLE_PROTOCOLS+=("$proto_name")
+  PROTOCOL_SUMMARIES+=("$(printf '%-12s %s' "$proto_name" "${proto_desc:-(no PROTO_DESC set)}")")
 done
 
 NAME=""
@@ -58,10 +65,18 @@ BUILD_OPENCONNECT=0
 PRIVILEGED=0
 PROFILE="vpn-client"
 OPENCONNECT_TAG="v9.21"
-ROUTE_NOPULL=1
 LAUNCHPAD_ID=""
 GITHUB_ID=""
-FORTI_USER=""
+
+# These are consumed indirectly: the sourced protocol lib reads them from
+# proto_validate_args / proto_write_env_extra, so nothing in THIS file
+# references them and shellcheck cannot see the use.
+# shellcheck disable=SC2034
+ROUTE_NOPULL=1   # openvpn
+# shellcheck disable=SC2034
+FORTI_USER=""    # fortissl
+# shellcheck disable=SC2034
+FORTI_PORT=""    # fortissl
 
 usage() {
   cat <<EOF
@@ -70,7 +85,8 @@ Usage:
 
 Required:
   --name NAME              Container name (e.g. vpn-example-anyconnect)
-  --protocol PROTO         One of: ${AVAILABLE_PROTOCOLS[*]}
+  --protocol PROTO         One of:
+$(printf '                             %s\n' "${PROTOCOL_SUMMARIES[@]}")
 
 Protocol-specific:
   --gateway HOST[/path]    Required for anyconnect/gp/fortissl
@@ -94,6 +110,7 @@ Optional:
   --launchpad-id ID        Import SSH keys via 'ssh-import-id lp:ID' (preferred)
   --github-id ID           Import SSH keys via 'ssh-import-id gh:ID' (combinable with --launchpad-id)
   --forti-user USER        For fortissl: FortiGate SSL VPN username (stored in /etc/vpn-client.env)
+  --forti-port PORT        For fortissl: gateway port (default: 443)
   -h, --help               Show this help
 
 Adding a new protocol: see docs/adding-a-protocol.md - no changes to this
@@ -102,6 +119,9 @@ EOF
   exit 1
 }
 
+# ROUTE_NOPULL / FORTI_USER / FORTI_PORT are assigned here but read only by the
+# protocol lib sourced further down, which shellcheck cannot follow.
+# shellcheck disable=SC2034
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --name) NAME="${2:-}"; shift 2 ;;
@@ -119,6 +139,7 @@ while [[ $# -gt 0 ]]; do
     --launchpad-id) LAUNCHPAD_ID="${2:-}"; shift 2 ;;
     --github-id) GITHUB_ID="${2:-}"; shift 2 ;;
     --forti-user) FORTI_USER="${2:-}"; shift 2 ;;
+    --forti-port) FORTI_PORT="${2:-}"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "Unknown arg: $1" >&2; usage ;;
   esac
@@ -139,6 +160,16 @@ if [[ ! -f "$PROTOCOL_LIB" ]]; then
 fi
 # shellcheck disable=SC1090
 source "$PROTOCOL_LIB"
+
+# PROTO_NAME is the plugin's self-declaration. Dispatch happens on the filename,
+# so a mismatch means the plugin's own error messages would name a different
+# protocol than the one the user asked for - catch it here rather than let it
+# confuse whoever hits the error later.
+if [[ "${PROTO_NAME:-}" != "$PROTOCOL" ]]; then
+  echo "ERROR: ${PROTOCOL_LIB} declares PROTO_NAME='${PROTO_NAME:-<unset>}'," >&2
+  echo "       but must declare '${PROTOCOL}' to match its filename." >&2
+  exit 1
+fi
 
 proto_validate_args
 
@@ -268,8 +299,21 @@ if declare -f proto_post_install >/dev/null 2>&1; then
 fi
 
 echo "==> Installing connect-vpn / disconnect-vpn"
-# Assemble the in-container connect-vpn script: shared helpers (common.sh) +
-# this protocol's proto_connect implementation + a small runner.
+# Assemble the in-container connect-vpn script by concatenating four pieces:
+#
+#   1. a header that sources /etc/vpn-client.env and pins the variables every
+#      protocol can rely on;
+#   2. lib/common.sh COPIED VERBATIM - not sourced. The container has no copy of
+#      this repo, so the helpers have to travel inside the generated script.
+#      That is why common.sh must stay self-contained and must not depend on
+#      anything beyond the base package set;
+#   3. the text emitted by this protocol's proto_connect_snippet, which defines
+#      the proto_connect function;
+#   4. a fixed runner that refuses to start on top of a live tunnel, calls
+#      proto_connect, and prints the resulting interface and routes.
+#
+# The result is written straight to /usr/local/bin/connect-vpn; nothing at
+# runtime reads this repo again.
 CONNECT_VPN_BODY="$(
   cat <<'HEADER'
 #!/usr/bin/env bash
@@ -283,8 +327,8 @@ VPN_ROUTES="${VPN_ROUTES:-}"
 VPN_INTERFACE="${VPN_INTERFACE:-vpn0}"
 
 HEADER
-  echo "# ---- shared helpers (scripts/lib/common.sh) ----"
-  cat "${LIB_DIR}/common.sh" | grep -v '^# lib/common.sh' | grep -v '^# Shared shell functions'
+  echo "# ---- shared helpers (copied verbatim from scripts/lib/common.sh) ----"
+  cat "${LIB_DIR}/common.sh"
   echo
   echo "# ---- protocol implementation (scripts/lib/protocol-${PROTOCOL}.sh) ----"
   proto_connect_snippet
@@ -362,8 +406,16 @@ if [[ "$CONTAINER_USER" != "root" ]]; then
       useradd -m -s /bin/bash '${CONTAINER_USER}'
     fi
     usermod -aG sudo '${CONTAINER_USER}' 2>/dev/null || true
+    # Every VPN client binary that connect-vpn / disconnect-vpn invoke under
+    # sudo has to be listed here, or the helpers stall on a password prompt.
+    # A new protocol adds its client (and any wrapper it needs, the way
+    # fortissl needs screen) to this line - see docs/adding-a-protocol.md.
+    #
+    # Deliberately NOT granted: tail. The only sudo tail calls are error-path
+    # log dumps guarded with '|| true', so they degrade to no output instead of
+    # failing, and granting it would hand this user root-read on every file.
     cat > /etc/sudoers.d/vpn-client <<SUDO
-${CONTAINER_USER} ALL=(root) NOPASSWD: /usr/sbin/openconnect, /usr/local/sbin/openconnect, /usr/sbin/openvpn, /usr/sbin/ip, /usr/bin/ip, /usr/bin/pkill, /usr/bin/kill
+${CONTAINER_USER} ALL=(root) NOPASSWD: /usr/sbin/openconnect, /usr/local/sbin/openconnect, /usr/sbin/openvpn, /usr/bin/openfortivpn, /usr/bin/screen, /usr/sbin/ip, /usr/bin/ip, /usr/bin/pkill, /usr/bin/kill
 SUDO
     chmod 440 /etc/sudoers.d/vpn-client
   "

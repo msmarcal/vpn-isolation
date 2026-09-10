@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE=/etc/vpn-client.env
+[[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+
+VPN_PROTOCOL="${VPN_PROTOCOL:?Set VPN_PROTOCOL in /etc/vpn-client.env}"
+VPN_ROUTES="${VPN_ROUTES:-}"
+VPN_INTERFACE="${VPN_INTERFACE:-vpn0}"
+
+# ---- shared helpers (copied verbatim from scripts/lib/common.sh) ----
+# shellcheck shell=bash
+#
+# Shared VPN helpers.
+#
+# This file is used two ways: sourced directly by the orchestrator
+# (create-vpn-lxd-container.sh) on the host, and COPIED VERBATIM into the
+# generated /usr/local/bin/connect-vpn inside each container. The container
+# never has a copy of this repository, so these functions only exist there
+# because their text was pasted in.
+#
+# That second use is the binding constraint: keep this file self-contained,
+# protocol-agnostic, and free of any dependency beyond the base package set
+# the orchestrator installs (iproute2, iptables, curl, openssh-*, dnsutils).
+# Anything sourced, imported, or shelled out to here must also exist inside
+# every container this repo can build.
+
+# apply_split_routes CIDR_LIST IFACE
+# CIDR_LIST is a comma-separated string (e.g. "10.1.0.0/16,10.2.0.0/24")
+apply_split_routes() {
+  local routes="$1" iface="$2"
+  [[ -z "$routes" ]] && return 0
+  IFS="," read -ra RLIST <<< "$routes"
+  local cidr cidr_trimmed
+  for cidr in "${RLIST[@]}"; do
+    cidr_trimmed="$(echo "$cidr" | xargs)"
+    [[ -z "$cidr_trimmed" ]] && continue
+    echo "Adding split route: $cidr_trimmed dev $iface"
+    sudo ip route replace "$cidr_trimmed" dev "$iface" 2>/dev/null \
+      || sudo ip route add "$cidr_trimmed" dev "$iface" || true
+  done
+}
+
+# wait_for_iface IFACE [FALLBACK_IFACE]
+# Polls up to ~40s for IFACE to appear; if FALLBACK_IFACE appears instead
+# (common with tools that always name their tunnel tun0), prints the fallback
+# name to stdout so callers can pick it up.
+wait_for_iface() {
+  local iface="$1" fallback="${2:-}"
+  # The counter is never read - this is a fixed number of one-second attempts.
+  for _ in $(seq 1 40); do
+    if ip link show "$iface" >/dev/null 2>&1; then
+      echo "$iface"
+      return 0
+    fi
+    if [[ -n "$fallback" ]] && ip link show "$fallback" >/dev/null 2>&1; then
+      echo "$fallback"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# ---- protocol implementation (scripts/lib/protocol-anyconnect.sh) ----
+proto_connect() {
+  [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; exit 1; }
+  echo "Connecting openconnect protocol=anyconnect to ${VPN_GATEWAY}"
+  echo "Split routes after connect: ${VPN_ROUTES:-<auto-detect>}"
+  echo
+  # -b backgrounds openconnect once authentication succeeds, so connect-vpn can
+  # return while the tunnel stays up. Because it detaches, a failed login shows
+  # up only as a missing interface below, not as a non-zero exit here.
+  sudo openconnect \
+    --protocol=anyconnect \
+    --interface="$VPN_INTERFACE" \
+    -b \
+    "$VPN_GATEWAY"
+  # openconnect honors --interface when it can, but falls back to tun0; accept
+  # either rather than guessing.
+  NEW_IFACE="$(wait_for_iface "$VPN_INTERFACE" tun0)" || {
+    echo "ERROR: tunnel interface did not appear (auth failed?)" >&2
+    exit 1
+  }
+  VPN_INTERFACE="$NEW_IFACE"
+
+  # Auto-detect routes from the server if VPN_ROUTES is empty or "auto".
+  # There is no separate query for this: openconnect already ran vpnc-script,
+  # which installed the server split-include routes on the tunnel interface, so
+  # reading the routing table back is what "asking the server" amounts to. Only
+  # works for a split-tunnel gateway - a full-tunnel one pushes a default route,
+  # which is filtered out below, leaving nothing to detect.
+  if [[ -z "$VPN_ROUTES" || "$VPN_ROUTES" == "auto" ]]; then
+    echo "Attempting to auto-detect split-include routes from server..."
+    DETECTED_ROUTES="$(ip route show dev "$VPN_INTERFACE" | awk '{print $1}' | grep -v '^default' | tr '\n' ',' | sed 's/,$//')"
+    if [[ -n "$DETECTED_ROUTES" ]]; then
+      echo "Detected routes from server: $DETECTED_ROUTES"
+      VPN_ROUTES="$DETECTED_ROUTES"
+    else
+      echo "WARNING: No split-include routes detected from server."
+      echo "         You may need to set --routes manually or use full tunnel."
+      VPN_ROUTES=""
+    fi
+  fi
+  
+  apply_split_routes "$VPN_ROUTES" "$VPN_INTERFACE"
+}
+
+# HARDCODED CLIENT LIST (1 of 3) - a new protocol must add its client binary
+# here, in disconnect-vpn, and in the sudoers allowlist. A client missing from
+# this guard lets a second connect-vpn start on top of a live tunnel.
+# See docs/adding-a-protocol.md.
+if pgrep -x openconnect >/dev/null 2>&1 || pgrep -x openvpn >/dev/null 2>&1 || pgrep -x openfortivpn >/dev/null 2>&1; then
+  echo "A VPN client is already running. Run disconnect-vpn first." >&2
+  exit 1
+fi
+
+proto_connect
+
+echo
+echo "VPN up on ${VPN_INTERFACE}."
+ip -br addr show "$VPN_INTERFACE" || true
+echo "Relevant routes:"
+ip route | grep -E "${VPN_INTERFACE}|$(echo "$VPN_ROUTES" | tr "," "|")" || ip route

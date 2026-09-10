@@ -36,8 +36,8 @@ apply_split_routes() {
 # name to stdout so callers can pick it up.
 wait_for_iface() {
   local iface="$1" fallback="${2:-}"
-  local i
-  for i in $(seq 1 40); do
+  # The counter is never read - this is a fixed number of one-second attempts.
+  for _ in $(seq 1 40); do
     if ip link show "$iface" >/dev/null 2>&1; then
       echo "$iface"
       return 0

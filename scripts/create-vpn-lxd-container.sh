@@ -253,7 +253,10 @@ for i in $(seq 1 60); do
     echo "WARNING: container network may not be ready yet; continuing anyway" >&2
   fi
 done
-# cloud-init may still hold the apt/dpkg lock right after boot; wait it out
+# cloud-init may still hold the apt/dpkg lock right after boot; wait it out.
+# Single quotes are deliberate: this loop must be evaluated by the shell INSIDE
+# the container, not expanded here on the host.
+# shellcheck disable=SC2016
 lxc exec "$NAME" -- bash -c '
   for i in $(seq 1 60); do
     if command -v cloud-init >/dev/null 2>&1; then
@@ -403,6 +406,7 @@ printf '%s\n' "$CONNECT_VPN_BODY" | lxc exec "$NAME" -- bash -c 'cat > /usr/loca
 # expanding HERE on the host - they must survive into the container script and
 # expand at disconnect time. Anything you add below therefore must not contain
 # a literal single quote, which would terminate the outer string.
+# shellcheck disable=SC2016
 lxc exec "$NAME" -- bash -lc 'cat > /usr/local/bin/disconnect-vpn <<'\''EOF'\''
 #!/usr/bin/env bash
 set -euo pipefail

@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE=/etc/vpn-client.env
+[[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+
+VPN_PROTOCOL="${VPN_PROTOCOL:?Set VPN_PROTOCOL in /etc/vpn-client.env}"
+VPN_ROUTES="${VPN_ROUTES:-}"
+VPN_INTERFACE="${VPN_INTERFACE:-vpn0}"
+
+# ---- shared helpers (copied verbatim from scripts/lib/common.sh) ----
+# shellcheck shell=bash
+#
+# Shared VPN helpers.
+#
+# This file is used two ways: sourced directly by the orchestrator
+# (create-vpn-lxd-container.sh) on the host, and COPIED VERBATIM into the
+# generated /usr/local/bin/connect-vpn inside each container. The container
+# never has a copy of this repository, so these functions only exist there
+# because their text was pasted in.
+#
+# That second use is the binding constraint: keep this file self-contained,
+# protocol-agnostic, and free of any dependency beyond the base package set
+# the orchestrator installs (iproute2, iptables, curl, openssh-*, dnsutils).
+# Anything sourced, imported, or shelled out to here must also exist inside
+# every container this repo can build.
+
+# apply_split_routes CIDR_LIST IFACE
+# CIDR_LIST is a comma-separated string (e.g. "10.1.0.0/16,10.2.0.0/24")
+apply_split_routes() {
+  local routes="$1" iface="$2"
+  [[ -z "$routes" ]] && return 0
+  IFS="," read -ra RLIST <<< "$routes"
+  local cidr cidr_trimmed
+  for cidr in "${RLIST[@]}"; do
+    cidr_trimmed="$(echo "$cidr" | xargs)"
+    [[ -z "$cidr_trimmed" ]] && continue
+    echo "Adding split route: $cidr_trimmed dev $iface"
+    sudo ip route replace "$cidr_trimmed" dev "$iface" 2>/dev/null \
+      || sudo ip route add "$cidr_trimmed" dev "$iface" || true
+  done
+}
+
+# wait_for_iface IFACE [FALLBACK_IFACE]
+# Polls up to ~40s for IFACE to appear; if FALLBACK_IFACE appears instead
+# (common with tools that always name their tunnel tun0), prints the fallback
+# name to stdout so callers can pick it up.
+wait_for_iface() {
+  local iface="$1" fallback="${2:-}"
+  # The counter is never read - this is a fixed number of one-second attempts.
+  for _ in $(seq 1 40); do
+    if ip link show "$iface" >/dev/null 2>&1; then
+      echo "$iface"
+      return 0
+    fi
+    if [[ -n "$fallback" ]] && ip link show "$fallback" >/dev/null 2>&1; then
+      echo "$fallback"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# ---- protocol implementation (scripts/lib/protocol-openvpn.sh) ----
+proto_connect() {
+  [[ -f "$VPN_OVPN" ]] || { echo "Missing profile: $VPN_OVPN" >&2; exit 1; }
+  echo "Connecting OpenVPN with $VPN_OVPN"
+  echo "Split routes after connect: ${VPN_ROUTES:-<none>}"
+  echo
+  EXTRA=()
+  # --route-nopull discards every route the server pushes, including the
+  # redirect-gateway default route that would otherwise full-tunnel the
+  # container. The split routes are then added explicitly below. This is the
+  # framework default; --no-route-nopull at creation opts out.
+  if [[ "${VPN_ROUTE_NOPULL:-1}" == "1" ]]; then
+    EXTRA+=(--route-nopull)
+  fi
+  # --daemon detaches, so authentication failures surface as a missing tun0
+  # rather than a non-zero exit - hence the log dump in the error path below.
+  sudo openvpn \
+    --config "$VPN_OVPN" \
+    --daemon openvpn-client \
+    --writepid /run/openvpn-client.pid \
+    --log /var/log/openvpn-client.log \
+    "${EXTRA[@]}"
+  # openvpn names its interface tun0; there is no --interface equivalent in use
+  # here, so no fallback name is passed to wait_for_iface.
+  VPN_INTERFACE=tun0
+  NEW_IFACE="$(wait_for_iface "$VPN_INTERFACE")" || {
+    echo "ERROR: tun0 did not appear. Last log lines:" >&2
+    sudo tail -n 40 /var/log/openvpn-client.log 2>/dev/null || true
+    exit 1
+  }
+  VPN_INTERFACE="$NEW_IFACE"
+  apply_split_routes "$VPN_ROUTES" "$VPN_INTERFACE"
+}
+
+# HARDCODED CLIENT LIST (1 of 3) - a new protocol must add its client binary
+# here, in disconnect-vpn, and in the sudoers allowlist. A client missing from
+# this guard lets a second connect-vpn start on top of a live tunnel.
+# See docs/adding-a-protocol.md.
+if pgrep -x openconnect >/dev/null 2>&1 || pgrep -x openvpn >/dev/null 2>&1 || pgrep -x openfortivpn >/dev/null 2>&1; then
+  echo "A VPN client is already running. Run disconnect-vpn first." >&2
+  exit 1
+fi
+
+proto_connect
+
+echo
+echo "VPN up on ${VPN_INTERFACE}."
+ip -br addr show "$VPN_INTERFACE" || true
+echo "Relevant routes:"
+ip route | grep -E "${VPN_INTERFACE}|$(echo "$VPN_ROUTES" | tr "," "|")" || ip route

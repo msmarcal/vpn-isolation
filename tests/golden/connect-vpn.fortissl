@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE=/etc/vpn-client.env
+[[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+
+VPN_PROTOCOL="${VPN_PROTOCOL:?Set VPN_PROTOCOL in /etc/vpn-client.env}"
+VPN_ROUTES="${VPN_ROUTES:-}"
+VPN_INTERFACE="${VPN_INTERFACE:-vpn0}"
+
+# ---- shared helpers (copied verbatim from scripts/lib/common.sh) ----
+# shellcheck shell=bash
+#
+# Shared VPN helpers.
+#
+# This file is used two ways: sourced directly by the orchestrator
+# (create-vpn-lxd-container.sh) on the host, and COPIED VERBATIM into the
+# generated /usr/local/bin/connect-vpn inside each container. The container
+# never has a copy of this repository, so these functions only exist there
+# because their text was pasted in.
+#
+# That second use is the binding constraint: keep this file self-contained,
+# protocol-agnostic, and free of any dependency beyond the base package set
+# the orchestrator installs (iproute2, iptables, curl, openssh-*, dnsutils).
+# Anything sourced, imported, or shelled out to here must also exist inside
+# every container this repo can build.
+
+# apply_split_routes CIDR_LIST IFACE
+# CIDR_LIST is a comma-separated string (e.g. "10.1.0.0/16,10.2.0.0/24")
+apply_split_routes() {
+  local routes="$1" iface="$2"
+  [[ -z "$routes" ]] && return 0
+  IFS="," read -ra RLIST <<< "$routes"
+  local cidr cidr_trimmed
+  for cidr in "${RLIST[@]}"; do
+    cidr_trimmed="$(echo "$cidr" | xargs)"
+    [[ -z "$cidr_trimmed" ]] && continue
+    echo "Adding split route: $cidr_trimmed dev $iface"
+    sudo ip route replace "$cidr_trimmed" dev "$iface" 2>/dev/null \
+      || sudo ip route add "$cidr_trimmed" dev "$iface" || true
+  done
+}
+
+# wait_for_iface IFACE [FALLBACK_IFACE]
+# Polls up to ~40s for IFACE to appear; if FALLBACK_IFACE appears instead
+# (common with tools that always name their tunnel tun0), prints the fallback
+# name to stdout so callers can pick it up.
+wait_for_iface() {
+  local iface="$1" fallback="${2:-}"
+  # The counter is never read - this is a fixed number of one-second attempts.
+  for _ in $(seq 1 40); do
+    if ip link show "$iface" >/dev/null 2>&1; then
+      echo "$iface"
+      return 0
+    fi
+    if [[ -n "$fallback" ]] && ip link show "$fallback" >/dev/null 2>&1; then
+      echo "$fallback"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# ---- protocol implementation (scripts/lib/protocol-fortissl.sh) ----
+proto_connect() {
+  [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; exit 1; }
+  
+  # Require TTY - openfortivpn needs interactive password entry
+  if [[ ! -t 0 ]]; then
+    echo "ERROR: openfortivpn requires interactive password entry (TTY)." >&2
+    echo "       Run with: lxc exec -t <container> -- connect-vpn" >&2
+    exit 1
+  fi
+  
+  echo "Connecting FortiSSL VPN to ${VPN_GATEWAY}:${VPN_FORTI_PORT:-443}"
+  
+  # Prompt for password BEFORE starting screen session
+  if [[ -n "$VPN_FORTI_USER" ]]; then
+    read -s -p "VPN password for ${VPN_FORTI_USER}: " VPN_PASSWORD
+    echo
+  else
+    read -s -p "VPN password: " VPN_PASSWORD
+    echo
+  fi
+  
+  # If OTP is configured, prompt for it too
+  VPN_OTP="${VPN_FORTI_OTP:-}"
+  if [[ -n "${VPN_FORTI_OTP_REQUIRED:-}" ]]; then
+    read -p "OTP/2FA token: " VPN_OTP
+  fi
+  
+  FORTI_ARGS=(
+    "${VPN_GATEWAY}:${VPN_FORTI_PORT:-443}"
+    --username="${VPN_FORTI_USER:-$USER}"
+    --password="${VPN_PASSWORD}"
+  )
+  
+  # Add OTP if provided
+  [[ -n "$VPN_OTP" ]] && FORTI_ARGS+=(--otp="${VPN_OTP}")
+  
+  # Use screen to maintain persistent session (openfortivpn requires TTY)
+  # -dmS: detached, create new session with name
+  # -L: enable logging to screenlog.0
+  sudo screen -dmS vpn-session -L -Logfile /var/log/openfortivpn.log \
+    openfortivpn "${FORTI_ARGS[@]}"
+  
+  echo "openfortivpn started in screen session, waiting for interface..."
+  
+  # Wait for any PPP interface to appear (kernel assigns ppp0, ppp1, etc)
+  local i
+  NEW_IFACE=""
+  for i in $(seq 1 60); do
+    NEW_IFACE="$(ip -o link show | awk -F': ' '{print $2}' | grep '^ppp' | head -1)"
+    [[ -n "$NEW_IFACE" ]] && break
+    sleep 1
+  done
+  
+  if [[ -z "$NEW_IFACE" ]]; then
+    echo "ERROR: PPP interface did not appear (auth failed?). Last log lines:" >&2
+    sudo tail -n 30 /var/log/openfortivpn.log >&2 || true
+    sudo screen -S vpn-session -X quit 2>/dev/null || true
+    exit 1
+  fi
+  
+  VPN_INTERFACE="$NEW_IFACE"
+  apply_split_routes "$VPN_ROUTES" "$VPN_INTERFACE"
+  
+  echo "FortiSSL VPN connected on ${VPN_INTERFACE}."
+  echo "Screen session: sudo screen -r vpn-session"
+  echo "Logs: sudo tail -f /var/log/openfortivpn.log"
+}
+
+# HARDCODED CLIENT LIST (1 of 3) - a new protocol must add its client binary
+# here, in disconnect-vpn, and in the sudoers allowlist. A client missing from
+# this guard lets a second connect-vpn start on top of a live tunnel.
+# See docs/adding-a-protocol.md.
+if pgrep -x openconnect >/dev/null 2>&1 || pgrep -x openvpn >/dev/null 2>&1 || pgrep -x openfortivpn >/dev/null 2>&1; then
+  echo "A VPN client is already running. Run disconnect-vpn first." >&2
+  exit 1
+fi
+
+proto_connect
+
+echo
+echo "VPN up on ${VPN_INTERFACE}."
+ip -br addr show "$VPN_INTERFACE" || true
+echo "Relevant routes:"
+ip route | grep -E "${VPN_INTERFACE}|$(echo "$VPN_ROUTES" | tr "," "|")" || ip route

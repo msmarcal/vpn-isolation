@@ -13,7 +13,7 @@
 #   ./create-vpn-lxd-container.sh \
 #     --name vpn-example-anyconnect --protocol anyconnect \
 #     --gateway vpn.example.com/group-path \
-#     --routes 10.10.0.0/24 --dns-domain internal.example.com \
+#     --routes 10.10.0.0/24 \
 #     --launchpad-id your-launchpad-id \
 #     --build-openconnect
 #
@@ -57,7 +57,6 @@ NAME=""
 PROTOCOL=""
 GATEWAY=""
 ROUTES=""
-DNS_DOMAIN=""
 OVPN=""
 CONTAINER_USER="root"
 IMAGE="ubuntu:24.04"
@@ -105,7 +104,6 @@ Optional:
                             detect the server-pushed routes after connecting
                             (implemented for anyconnect; other protocols add no
                             manual routes). Editable later in /etc/vpn-client.env.
-  --dns-domain DOMAIN      Informational / helper default domain
   --user USER              Container login user (default: root - always exists;
                             if set to a non-root user that doesn't exist yet,
                             it will be created with sudo + a home dir)
@@ -136,13 +134,9 @@ EOF
 #
 # connect-vpn, disconnect-vpn and the sudoers allowlist are rendered here on the
 # host into local files, then copied into the container with `lxc file push`.
-# Two reasons for doing it this way:
-#
-#   - Container creation and --refresh-helpers call the same render functions,
-#     so an existing container can be brought up to date from exactly the source
-#     a fresh one would get. Before this, a fix to a helper (such as the
-#     openfortivpn disconnect ordering) only ever reached NEW containers.
-#   - `lxc file push` works on a stopped container; `lxc exec` does not.
+# Container creation and --refresh-helpers share these render functions, so an
+# existing container gets exactly what a fresh one would; and `lxc file push`
+# works on a stopped container, where `lxc exec` does not.
 # ---------------------------------------------------------------------------
 
 HELPER_WORK_DIR=""
@@ -252,16 +246,11 @@ fi
 
 if pgrep -x openfortivpn >/dev/null 2>&1; then
   echo "Stopping openfortivpn..."
-  # SIGTERM openfortivpn directly first - lets it close the PPP session
-  # cleanly (logout from gateway, release /dev/ppp) instead of yanking the
-  # screen session out from under it, which can leave /dev/ppp in a state
-  # where the next pppd fails with "Could not set tty to PPP discipline:
-  # Operation not permitted" until the container is restarted.
+  # SIGTERM first and wait for it to exit, so it logs out of the gateway and
+  # releases /dev/ppp itself. Closing the screen session while it is still
+  # tearing down can leave /dev/ppp unusable ("Could not set tty to PPP
+  # discipline") until the container is restarted. Give up after 15 seconds.
   sudo pkill -TERM openfortivpn 2>/dev/null || true
-  # Wait for it to actually exit rather than for a fixed delay. The gateway
-  # logout can take longer than a couple of seconds, and closing the screen
-  # session while openfortivpn is still tearing down brings back exactly the
-  # PPP failure described above. Give up after 15 seconds.
   for _ in $(seq 1 15); do
     pgrep -x openfortivpn >/dev/null 2>&1 || break
     sleep 1
@@ -349,30 +338,19 @@ install_sudoers() {
 #
 # connect-vpn and disconnect-vpn `source` this file, so every value in it is
 # shell syntax, not plain text. Values come straight from the command line
-# (--gateway, --dns-domain, --forti-user, ...), and a value written raw breaks
-# in ways that are silent at creation time and only surface on the first
-# connect: a space makes `source` run the rest of the value as a command, an
-# apostrophe makes the whole file fail to load, and `$(...)` or backticks get
-# executed.
-#
-# The file used to be written with `lxc exec ... bash -lc "cat <<EOF ..."`,
-# which expanded each value twice - once in the host's double quotes and again
-# in the container's unquoted heredoc - so a `$(...)` in a value actually ran,
-# as root, inside the container while the file was being written. It is now
-# rendered on the host and copied in with `lxc file push`, which does no
-# expansion at all.
+# (--gateway, --forti-user, ...); written raw, a space would make `source` run
+# the rest of the value as a command, an apostrophe would break the whole file,
+# and `$(...)` would execute. So the file is rendered on the host with env_kv
+# and copied in with `lxc file push`, which does no expansion.
 # ---------------------------------------------------------------------------
 
 # env_kv KEY VALUE - print one assignment, quoted so that `source` yields VALUE
 # back byte for byte.
 #
 # Values made only of characters that are literal in an assignment (hostnames,
-# paths, CIDR lists, numbers) are written bare, exactly as before, so the file
-# stays easy to read and edit by hand. Anything else is single-quoted, with any
-# embedded single quote written as '\''. Inside single quotes bash treats every
-# byte literally - spaces, $, backticks, newlines - so nothing is expanded.
-# `printf %q` is deliberately not used: it also escapes harmless characters
-# such as commas, turning VPN_ROUTES=a,b into VPN_ROUTES=a\,b.
+# paths, CIDR lists, numbers) are written bare, so the file stays easy to edit
+# by hand. Anything else is single-quoted, with embedded single quotes written
+# as '\''. Not `printf %q`: it also escapes commas, turning a,b into a\,b.
 #
 # Protocol plugins call this from proto_write_env_extra, so it is part of the
 # plugin contract - see docs/adding-a-protocol.md.
@@ -390,7 +368,6 @@ render_env_file() {
   echo "# Managed by create-vpn-lxd-container.sh"
   env_kv VPN_PROTOCOL "$PROTOCOL"
   env_kv VPN_ROUTES "$ROUTES"
-  env_kv VPN_DNS_DOMAIN "$DNS_DOMAIN"
   env_kv VPN_INTERFACE "$VPN_IFACE"
   proto_write_env_extra
 }
@@ -491,7 +468,6 @@ while [[ $# -gt 0 ]]; do
     --protocol) PROTOCOL="${2:-}"; shift 2 ;;
     --gateway) GATEWAY="${2:-}"; shift 2 ;;
     --routes) ROUTES="${2:-}"; shift 2 ;;
-    --dns-domain) DNS_DOMAIN="${2:-}"; shift 2 ;;
     --ovpn) OVPN="${2:-}"; shift 2 ;;
     --user) CONTAINER_USER="${2:-}"; shift 2 ;;
     --image) IMAGE="${2:-}"; shift 2 ;;
@@ -647,36 +623,25 @@ if ! lxc profile device get "$PROFILE" tun type >/dev/null 2>&1; then
   lxc profile device add "$PROFILE" tun unix-char path=/dev/net/tun
 fi
 
-# PPP device required for FortiSSL VPN (openfortivpn uses pppd).
-#
-# mode=0660 (root:root), measured on LXD 5.21.7: root opens the device fine,
-# and connect-vpn always invokes openfortivpn through sudo, so pppd reaches it
-# as root even in a non-root --user container. This used to be 0666, which
-# additionally let any unprivileged process in the container open /dev/ppp -
-# something nothing here needs. Stated explicitly rather than relying on the
-# LXD default, which happens to be 0660 today but is not ours to depend on.
+# PPP device required for FortiSSL VPN (openfortivpn uses pppd). 0660 is
+# enough: connect-vpn always runs openfortivpn through sudo, so pppd opens the
+# device as root even in a non-root --user container. Stated explicitly rather
+# than relying on the LXD default.
 if ! lxc profile device get "$PROFILE" ppp type >/dev/null 2>&1; then
   lxc profile device add "$PROFILE" ppp unix-char path=/dev/ppp mode=0660
 fi
 
-# Correct a profile created by an older revision of this script, which used
-# 0666. Existing containers pick the tighter mode up on their next restart.
+# Tighten a profile that still has the old 0666 mode. Existing containers pick
+# it up on their next restart.
 PPP_MODE="$(lxc profile device get "$PROFILE" ppp mode 2>/dev/null || echo "")"
 if [[ -n "$PPP_MODE" && "$PPP_MODE" != "0660" ]]; then
   echo "    tightening /dev/ppp mode on profile '${PROFILE}': ${PPP_MODE} -> 0660"
   lxc profile device set "$PROFILE" ppp mode=0660
 fi
 
-# NOTE: security.nesting is deliberately NOT set. It used to be enabled here,
-# but nothing in this setup runs a container inside the container, which is what
-# nesting is for.
-#
-# Verified on LXD 5.21.7 / ubuntu:24.04 with nesting off: the container boots,
-# /dev/net/tun and /dev/ppp both open O_RDWR, a tun interface can be created,
-# addressed and brought up, a split route can be installed on it, and the
-# default route stays on eth0. Not covered by that test: a live tunnel against
-# a real gateway. If a VPN client ever fails here in a way that points at
-# nesting, record the specific failure alongside re-enabling it.
+# security.nesting is deliberately not set: nothing here runs a container inside
+# the container, and tun, ppp and split routing were verified to work without
+# it. Re-enable only for a specific, recorded failure.
 
 if lxc info "$NAME" >/dev/null 2>&1; then
   echo "ERROR: container '${NAME}' already exists. Delete it first: lxc delete -f ${NAME}" >&2

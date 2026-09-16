@@ -54,7 +54,6 @@ The create script ensures profile `vpn-client` exists (`eth0` on `lxdbr0`, `/dev
   --protocol anyconnect \
   --gateway vpn.example.com/group-path \
   --routes 10.10.0.0/24 \
-  --dns-domain internal.example.com \
   --launchpad-id your-launchpad-id \
   --build-openconnect
 ```
@@ -242,7 +241,6 @@ Because the file is `source`d, it is shell syntax. Plain values (hostnames, path
 |---|---|---|
 | `VPN_PROTOCOL` | all | Which protocol the container was built for. **Do not edit.** `--refresh-helpers` reads it to decide which protocol's `connect-vpn` to generate, but it installs no packages, so pointing it at another protocol produces a container that cannot connect. Recreate the container instead. |
 | `VPN_ROUTES` | all | Comma-separated split routes, no spaces. `auto` asks the protocol to detect server-pushed routes (anyconnect only); empty means no manual routes. |
-| `VPN_DNS_DOMAIN` | all | Informational only - nothing in `connect-vpn` reads it. |
 | `VPN_INTERFACE` | all | Expected tunnel interface. `vpn0` by default, `ppp0` for fortissl. `connect-vpn` overwrites it at runtime with whatever actually appeared. |
 | `VPN_GATEWAY` | anyconnect, gp, fortissl | Portal/gateway host, including any group path for anyconnect. |
 | `VPN_OVPN` | openvpn | Path to the profile inside the container (`/etc/openvpn/client/client.ovpn`). |

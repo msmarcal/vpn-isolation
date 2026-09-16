@@ -57,7 +57,8 @@ vpn-isolation/
 └── scripts/
     ├── create-vpn-lxd-container.sh    # orchestrator: LXD profile/launch, dispatch to protocol libs
     └── lib/
-        ├── common.sh                  # shared helpers (split routes, interface wait)
+        ├── common.sh                  # shared helpers, copied into the container (split routes, interface wait)
+        ├── orchestrator.sh            # host-side helpers: render/install connect-vpn, disconnect-vpn, env, sudoers
         ├── protocol-anyconnect.sh     # Cisco AnyConnect (openconnect)
         ├── protocol-gp.sh             # Palo Alto GlobalProtect (openconnect)
         ├── protocol-openvpn.sh        # OpenVPN (.ovpn profile)

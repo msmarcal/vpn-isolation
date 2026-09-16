@@ -151,12 +151,12 @@ plus any wrapper you invoke under sudo, the way fortissl needs `screen` - if
 the container is meant to run as anything other than `root`. A binary missing
 from that list makes `connect-vpn` hang on a sudo password prompt.
 
-All three lists live in the render functions near the top of the orchestrator
+All three lists live in the render functions in `scripts/lib/orchestrator.sh`
 (`render_connect_vpn`, `render_disconnect_vpn`, `render_sudoers`), and each is
 tagged `HARDCODED CLIENT LIST (N of 3)`:
 
 ```bash
-grep -n "HARDCODED CLIENT LIST" scripts/create-vpn-lxd-container.sh
+grep -n "HARDCODED CLIENT LIST" scripts/lib/orchestrator.sh
 ```
 
 Editing any of them only affects containers created afterwards. Existing
@@ -164,9 +164,9 @@ containers pick the change up with `--refresh-helpers`.
 
 ## What you should NOT need to touch
 
-- The rest of `scripts/create-vpn-lxd-container.sh` - profile setup, launch,
-  package install, env file, SSH provisioning and the `connect-vpn` assembly
-  are all protocol-agnostic.
+- The rest of `scripts/create-vpn-lxd-container.sh` and `scripts/lib/orchestrator.sh`
+  - profile setup, launch, package install, env file, SSH provisioning and the
+  `connect-vpn` assembly are all protocol-agnostic.
 - `scripts/lib/common.sh` (shared helpers - only touch if genuinely shared
   logic is missing, and keep it protocol-agnostic). Note this file is copied
   verbatim into the in-container `connect-vpn`, so it must stay self-contained

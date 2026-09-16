@@ -67,6 +67,7 @@ PROFILE="vpn-client"
 OPENCONNECT_TAG="v9.21"
 LAUNCHPAD_ID=""
 GITHUB_ID=""
+REFRESH_HELPERS=0
 
 # These are consumed indirectly: the sourced protocol lib reads them from
 # proto_validate_args / proto_write_env_extra, so nothing in THIS file
@@ -82,6 +83,7 @@ usage() {
   cat <<EOF
 Usage:
   create-vpn-lxd-container.sh --name NAME --protocol PROTO [options]
+  create-vpn-lxd-container.sh --name NAME --refresh-helpers
 
 Required:
   --name NAME              Container name (e.g. vpn-example-anyconnect)
@@ -111,12 +113,231 @@ Optional:
   --github-id ID           Import SSH keys via 'ssh-import-id gh:ID' (combinable with --launchpad-id)
   --forti-user USER        For fortissl: FortiGate SSL VPN username (stored in /etc/vpn-client.env)
   --forti-port PORT        For fortissl: gateway port (default: 443)
+  --refresh-helpers        Regenerate connect-vpn, disconnect-vpn and (for a
+                            non-root container) the sudoers allowlist inside an
+                            EXISTING container, from the current source. Works
+                            on a stopped container. Leaves /etc/vpn-client.env,
+                            packages and SSH keys untouched. The protocol is
+                            read from the container; --protocol is optional.
   -h, --help               Show this help
 
 Adding a new protocol: see docs/adding-a-protocol.md - no changes to this
 file are required, just drop scripts/lib/protocol-<name>.sh.
 EOF
   exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Generated in-container helpers
+#
+# connect-vpn, disconnect-vpn and the sudoers allowlist are rendered here on the
+# host into local files, then copied into the container with `lxc file push`.
+# Two reasons for doing it this way:
+#
+#   - Container creation and --refresh-helpers call the same render functions,
+#     so an existing container can be brought up to date from exactly the source
+#     a fresh one would get. Before this, a fix to a helper (such as the
+#     openfortivpn disconnect ordering) only ever reached NEW containers.
+#   - `lxc file push` works on a stopped container; `lxc exec` does not.
+# ---------------------------------------------------------------------------
+
+HELPER_WORK_DIR=""
+
+cleanup_helper_work_dir() {
+  if [[ -n "$HELPER_WORK_DIR" ]]; then
+    rm -rf "$HELPER_WORK_DIR"
+  fi
+}
+
+helper_work_dir() {
+  if [[ -z "$HELPER_WORK_DIR" ]]; then
+    HELPER_WORK_DIR="$(mktemp -d)"
+    trap cleanup_helper_work_dir EXIT
+  fi
+}
+
+# render_connect_vpn - print the in-container connect-vpn for $PROTOCOL.
+# The protocol lib must already be sourced (for proto_connect_snippet).
+#
+# The script is four concatenated pieces:
+#
+#   1. a header that sources /etc/vpn-client.env and pins the variables every
+#      protocol can rely on;
+#   2. lib/common.sh COPIED VERBATIM - not sourced. The container has no copy of
+#      this repo, so the helpers have to travel inside the generated script.
+#      That is why common.sh must stay self-contained and must not depend on
+#      anything beyond the base package set;
+#   3. the text emitted by this protocol's proto_connect_snippet, which defines
+#      the proto_connect function;
+#   4. a fixed runner that refuses to start on top of a live tunnel, calls
+#      proto_connect, and prints the resulting interface and routes.
+#
+# Nothing at runtime reads this repo again.
+render_connect_vpn() {
+  cat <<'HEADER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE=/etc/vpn-client.env
+[[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+
+VPN_PROTOCOL="${VPN_PROTOCOL:?Set VPN_PROTOCOL in /etc/vpn-client.env}"
+VPN_ROUTES="${VPN_ROUTES:-}"
+VPN_INTERFACE="${VPN_INTERFACE:-vpn0}"
+
+HEADER
+  echo "# ---- shared helpers (copied verbatim from scripts/lib/common.sh) ----"
+  cat "${LIB_DIR}/common.sh"
+  echo
+  echo "# ---- protocol implementation (scripts/lib/protocol-${PROTOCOL}.sh) ----"
+  proto_connect_snippet
+  cat <<'RUNNER'
+
+# HARDCODED CLIENT LIST (1 of 3) - a new protocol must add its client binary
+# here, in disconnect-vpn, and in the sudoers allowlist. A client missing from
+# this guard lets a second connect-vpn start on top of a live tunnel.
+# See docs/adding-a-protocol.md.
+if pgrep -x openconnect >/dev/null 2>&1 || pgrep -x openvpn >/dev/null 2>&1 || pgrep -x openfortivpn >/dev/null 2>&1; then
+  echo "A VPN client is already running. Run disconnect-vpn first." >&2
+  exit 1
+fi
+
+proto_connect
+
+echo
+echo "VPN up on ${VPN_INTERFACE}."
+ip -br addr show "$VPN_INTERFACE" || true
+echo "Relevant routes:"
+ip route | grep -E "${VPN_INTERFACE}|$(echo "$VPN_ROUTES" | tr "," "|")" || ip route
+RUNNER
+}
+
+# render_disconnect_vpn - print the in-container disconnect-vpn. It is the same
+# for every protocol. The quoted heredoc delimiter keeps $VPN_INTERFACE and
+# friends literal, so they expand inside the container at disconnect time.
+render_disconnect_vpn() {
+  cat <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+ENV_FILE=/etc/vpn-client.env
+[[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+VPN_INTERFACE="${VPN_INTERFACE:-vpn0}"
+
+# HARDCODED CLIENT LIST (2 of 3) - see docs/adding-a-protocol.md.
+# One block per known client binary. A protocol whose client is missing here is
+# never stopped, and this script still reports "VPN down." at the end, so the
+# omission looks like success while the tunnel stays up. Each block is a no-op
+# when that client is not running, so adding one is always safe.
+
+if pgrep -x openconnect >/dev/null 2>&1; then
+  echo "Stopping openconnect..."
+  sudo pkill -TERM openconnect || true
+  sleep 1
+  sudo pkill -KILL openconnect 2>/dev/null || true
+fi
+
+if pgrep -x openvpn >/dev/null 2>&1; then
+  echo "Stopping openvpn..."
+  if [[ -f /run/openvpn-client.pid ]]; then
+    sudo kill "$(cat /run/openvpn-client.pid)" 2>/dev/null || true
+  fi
+  sudo pkill -TERM openvpn || true
+  sleep 1
+  sudo pkill -KILL openvpn 2>/dev/null || true
+fi
+
+if pgrep -x openfortivpn >/dev/null 2>&1; then
+  echo "Stopping openfortivpn..."
+  # SIGTERM openfortivpn directly first - lets it close the PPP session
+  # cleanly (logout from gateway, release /dev/ppp) instead of yanking the
+  # screen session out from under it, which can leave /dev/ppp in a state
+  # where the next pppd fails with "Could not set tty to PPP discipline:
+  # Operation not permitted" until the container is restarted.
+  sudo pkill -TERM openfortivpn 2>/dev/null || true
+  # Wait for it to actually exit rather than for a fixed delay. The gateway
+  # logout can take longer than a couple of seconds, and closing the screen
+  # session while openfortivpn is still tearing down brings back exactly the
+  # PPP failure described above. Give up after 15 seconds.
+  for _ in $(seq 1 15); do
+    pgrep -x openfortivpn >/dev/null 2>&1 || break
+    sleep 1
+  done
+  # Now it is safe to close the (now-empty) screen session
+  sudo screen -S vpn-session -X quit 2>/dev/null || true
+  # Fallback: force-kill anything still around, and say so - a forced kill is
+  # the case that can leave /dev/ppp stuck and need an lxc restart.
+  if pgrep -x openfortivpn >/dev/null 2>&1; then
+    echo "openfortivpn did not exit within 15s of SIGTERM; killing it." >&2
+    echo "If the next connect fails with a PPP discipline error, run: lxc restart <container>" >&2
+    sudo pkill -KILL openfortivpn 2>/dev/null || true
+  fi
+fi
+
+# Sweep up interfaces the clients above left behind - a killed client does not
+# always remove its own link. VPN_INTERFACE covers whatever the container was
+# configured for; the rest are the names the supported clients actually use.
+# Extend this list if a new protocol names its tunnel something else. Deleting
+# a ppp link usually fails because pppd owns it and it disappears with the
+# process, hence the tolerated errors.
+for iface in "$VPN_INTERFACE" vpn0 tun0 ppp0; do
+  if ip link show "$iface" >/dev/null 2>&1; then
+    echo "Deleting $iface..."
+    sudo ip link set "$iface" down 2>/dev/null || true
+    sudo ip link delete "$iface" 2>/dev/null || true
+  fi
+done
+
+echo "VPN down."
+EOF
+}
+
+# render_sudoers USER - print the /etc/sudoers.d/vpn-client line for USER.
+#
+# HARDCODED CLIENT LIST (3 of 3) - see docs/adding-a-protocol.md.
+# Every VPN client binary that connect-vpn / disconnect-vpn invoke under sudo
+# has to be listed here, or the helpers stall on a password prompt. A new
+# protocol adds its client (and any wrapper it needs, the way fortissl needs
+# screen) to this line.
+#
+# Deliberately NOT granted: tail. The only sudo tail calls are error-path log
+# dumps guarded with '|| true', so they degrade to no output instead of
+# failing, and granting it would hand this user root-read on every file.
+render_sudoers() {
+  printf '%s ALL=(root) NOPASSWD: /usr/sbin/openconnect, /usr/local/sbin/openconnect, /usr/sbin/openvpn, /usr/bin/openfortivpn, /usr/bin/screen, /usr/sbin/ip, /usr/bin/ip, /usr/bin/pkill, /usr/bin/kill\n' "$1"
+}
+
+# install_helpers NAME - render connect-vpn and disconnect-vpn and push them.
+install_helpers() {
+  local name="$1" f
+  helper_work_dir
+  render_connect_vpn > "${HELPER_WORK_DIR}/connect-vpn"
+  render_disconnect_vpn > "${HELPER_WORK_DIR}/disconnect-vpn"
+  for f in connect-vpn disconnect-vpn; do
+    # The generated text is only ever parsed inside the container, so a broken
+    # protocol snippet would otherwise surface on the next real connect.
+    if ! bash -n "${HELPER_WORK_DIR}/${f}"; then
+      echo "ERROR: generated ${f} does not parse; not installing it." >&2
+      exit 1
+    fi
+    lxc file push --uid 0 --gid 0 --mode 0755 \
+      "${HELPER_WORK_DIR}/${f}" "${name}/usr/local/bin/${f}" >/dev/null
+  done
+}
+
+# install_sudoers NAME USER - render the allowlist for USER and push it.
+install_sudoers() {
+  local name="$1" user="$2"
+  helper_work_dir
+  render_sudoers "$user" > "${HELPER_WORK_DIR}/vpn-client"
+  # A malformed file in sudoers.d breaks sudo for the whole container, not just
+  # for these helpers, so validate it on the host first when visudo is there.
+  if command -v visudo >/dev/null 2>&1 \
+     && ! visudo -cf "${HELPER_WORK_DIR}/vpn-client" >/dev/null; then
+    echo "ERROR: generated sudoers entry failed 'visudo -c'; not installing it." >&2
+    exit 1
+  fi
+  lxc file push --uid 0 --gid 0 --mode 0440 \
+    "${HELPER_WORK_DIR}/vpn-client" "${name}/etc/sudoers.d/vpn-client" >/dev/null
 }
 
 # ROUTE_NOPULL / FORTI_USER / FORTI_PORT are assigned here but read only by the
@@ -140,14 +361,59 @@ while [[ $# -gt 0 ]]; do
     --github-id) GITHUB_ID="${2:-}"; shift 2 ;;
     --forti-user) FORTI_USER="${2:-}"; shift 2 ;;
     --forti-port) FORTI_PORT="${2:-}"; shift 2 ;;
+    --refresh-helpers) REFRESH_HELPERS=1; shift ;;
     -h|--help) usage ;;
     *) echo "Unknown arg: $1" >&2; usage ;;
   esac
 done
 
-if [[ -z "$NAME" || -z "$PROTOCOL" ]]; then
-  echo "ERROR: --name and --protocol are required." >&2
+if [[ -z "$NAME" ]]; then
+  echo "ERROR: --name is required." >&2
   usage
+fi
+
+# --refresh-helpers: the container already exists and already knows which
+# protocol it was built for, so read that back instead of trusting the caller.
+# Rebuilding a fortissl container's helpers from the anyconnect snippet would
+# silently leave it unable to connect.
+if [[ "$REFRESH_HELPERS" -eq 1 ]]; then
+  if ! command -v lxc >/dev/null 2>&1; then
+    echo "ERROR: lxc not found. Install/configure LXD first." >&2
+    exit 1
+  fi
+  if ! lxc info "$NAME" >/dev/null 2>&1; then
+    echo "ERROR: container '${NAME}' does not exist; --refresh-helpers only updates an existing one." >&2
+    exit 1
+  fi
+  # `lxc file pull` works on a stopped container, so nothing is started here.
+  # `|| true`: under pipefail a missing file would otherwise abort right here,
+  # before the explanatory error below gets printed.
+  ENV_PROTOCOL="$(lxc file pull "${NAME}/etc/vpn-client.env" - 2>/dev/null \
+    | sed -n 's/^VPN_PROTOCOL=//p' | head -1 || true)"
+  if [[ -z "$ENV_PROTOCOL" ]]; then
+    echo "ERROR: could not read VPN_PROTOCOL from ${NAME}:/etc/vpn-client.env." >&2
+    echo "       Was this container created by create-vpn-lxd-container.sh?" >&2
+    exit 1
+  fi
+  if [[ -n "$PROTOCOL" && "$PROTOCOL" != "$ENV_PROTOCOL" ]]; then
+    echo "ERROR: ${NAME} was built for protocol '${ENV_PROTOCOL}', not '${PROTOCOL}'." >&2
+    echo "       Refreshing it with another protocol's helpers would break it; recreate it instead." >&2
+    exit 1
+  fi
+  PROTOCOL="$ENV_PROTOCOL"
+fi
+
+if [[ -z "$PROTOCOL" ]]; then
+  echo "ERROR: --protocol is required." >&2
+  usage
+fi
+
+# The protocol name becomes part of a path that gets sourced. In refresh mode it
+# comes from a file inside the container, so hold it to the shape a plugin
+# filename can actually have before it gets anywhere near `source`.
+if [[ ! "$PROTOCOL" =~ ^[a-z0-9-]+$ ]]; then
+  echo "ERROR: invalid protocol name '${PROTOCOL}'." >&2
+  exit 1
 fi
 
 # --routes is optional; defaults to "auto" for auto-detection if protocol supports it
@@ -169,6 +435,40 @@ if [[ "${PROTO_NAME:-}" != "$PROTOCOL" ]]; then
   echo "ERROR: ${PROTOCOL_LIB} declares PROTO_NAME='${PROTO_NAME:-<unset>}'," >&2
   echo "       but must declare '${PROTOCOL}' to match its filename." >&2
   exit 1
+fi
+
+if [[ "$REFRESH_HELPERS" -eq 1 ]]; then
+  echo "==> Refreshing helpers in ${NAME} (protocol: ${PROTOCOL})"
+
+  # The container's login user is not recorded anywhere except in the sudoers
+  # entry this script wrote for it, so read it back from there. No entry means
+  # a root container, which has no allowlist to refresh. Checked BEFORE pushing
+  # anything, so a bad entry aborts the refresh instead of leaving it half done.
+  SUDO_USER_IN_CONTAINER="$(lxc file pull "${NAME}/etc/sudoers.d/vpn-client" - 2>/dev/null \
+    | awk '!/^[[:space:]]*(#|$)/ { print $1; exit }' || true)"
+  if [[ -n "$SUDO_USER_IN_CONTAINER" && ! "$SUDO_USER_IN_CONTAINER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    echo "ERROR: unexpected user '${SUDO_USER_IN_CONTAINER}' in ${NAME}:/etc/sudoers.d/vpn-client; nothing was changed." >&2
+    exit 1
+  fi
+
+  install_helpers "$NAME"
+  echo "    /usr/local/bin/connect-vpn and /usr/local/bin/disconnect-vpn updated"
+
+  if [[ -n "$SUDO_USER_IN_CONTAINER" ]]; then
+    install_sudoers "$NAME" "$SUDO_USER_IN_CONTAINER"
+    echo "    /etc/sudoers.d/vpn-client updated for ${SUDO_USER_IN_CONTAINER}"
+  else
+    echo "    no /etc/sudoers.d/vpn-client (root container); sudoers left alone"
+  fi
+
+  cat <<EOF
+
+Done. /etc/vpn-client.env, packages and SSH keys were not touched.
+The new helpers take effect on the next connect-vpn / disconnect-vpn run.
+If a VPN is connected right now, the next disconnect-vpn already uses the new
+teardown.
+EOF
+  exit 0
 fi
 
 proto_validate_args
@@ -337,136 +637,7 @@ if declare -f proto_post_install >/dev/null 2>&1; then
 fi
 
 echo "==> Installing connect-vpn / disconnect-vpn"
-# Assemble the in-container connect-vpn script by concatenating four pieces:
-#
-#   1. a header that sources /etc/vpn-client.env and pins the variables every
-#      protocol can rely on;
-#   2. lib/common.sh COPIED VERBATIM - not sourced. The container has no copy of
-#      this repo, so the helpers have to travel inside the generated script.
-#      That is why common.sh must stay self-contained and must not depend on
-#      anything beyond the base package set;
-#   3. the text emitted by this protocol's proto_connect_snippet, which defines
-#      the proto_connect function;
-#   4. a fixed runner that refuses to start on top of a live tunnel, calls
-#      proto_connect, and prints the resulting interface and routes.
-#
-# The result is written straight to /usr/local/bin/connect-vpn; nothing at
-# runtime reads this repo again.
-CONNECT_VPN_BODY="$(
-  cat <<'HEADER'
-#!/usr/bin/env bash
-set -euo pipefail
-
-ENV_FILE=/etc/vpn-client.env
-[[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
-
-VPN_PROTOCOL="${VPN_PROTOCOL:?Set VPN_PROTOCOL in /etc/vpn-client.env}"
-VPN_ROUTES="${VPN_ROUTES:-}"
-VPN_INTERFACE="${VPN_INTERFACE:-vpn0}"
-
-HEADER
-  echo "# ---- shared helpers (copied verbatim from scripts/lib/common.sh) ----"
-  cat "${LIB_DIR}/common.sh"
-  echo
-  echo "# ---- protocol implementation (scripts/lib/protocol-${PROTOCOL}.sh) ----"
-  proto_connect_snippet
-  cat <<'RUNNER'
-
-# HARDCODED CLIENT LIST (1 of 3) - a new protocol must add its client binary
-# here, in disconnect-vpn, and in the sudoers allowlist. A client missing from
-# this guard lets a second connect-vpn start on top of a live tunnel.
-# See docs/adding-a-protocol.md.
-if pgrep -x openconnect >/dev/null 2>&1 || pgrep -x openvpn >/dev/null 2>&1 || pgrep -x openfortivpn >/dev/null 2>&1; then
-  echo "A VPN client is already running. Run disconnect-vpn first." >&2
-  exit 1
-fi
-
-proto_connect
-
-echo
-echo "VPN up on ${VPN_INTERFACE}."
-ip -br addr show "$VPN_INTERFACE" || true
-echo "Relevant routes:"
-ip route | grep -E "${VPN_INTERFACE}|$(echo "$VPN_ROUTES" | tr "," "|")" || ip route
-RUNNER
-)"
-
-# connect-vpn is piped in over stdin because its body is assembled here on the
-# host and can contain anything a protocol emits - keeping it out of the
-# command line avoids every quoting problem at once.
-printf '%s\n' "$CONNECT_VPN_BODY" | lxc exec "$NAME" -- bash -c 'cat > /usr/local/bin/connect-vpn && chmod +x /usr/local/bin/connect-vpn'
-
-# disconnect-vpn is fixed text, so it is written with an inline heredoc instead.
-# Read the quoting carefully before editing: the outer bash -lc argument is in
-# single quotes, and '\''EOF'\'' is how a single-quoted EOF is embedded inside
-# it. The quoted heredoc delimiter is what stops $VPN_INTERFACE and friends from
-# expanding HERE on the host - they must survive into the container script and
-# expand at disconnect time. Anything you add below therefore must not contain
-# a literal single quote, which would terminate the outer string.
-lxc exec "$NAME" -- bash -lc 'cat > /usr/local/bin/disconnect-vpn <<'\''EOF'\''
-#!/usr/bin/env bash
-set -euo pipefail
-ENV_FILE=/etc/vpn-client.env
-[[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
-VPN_INTERFACE="${VPN_INTERFACE:-vpn0}"
-
-# HARDCODED CLIENT LIST (2 of 3) - see docs/adding-a-protocol.md.
-# One block per known client binary. A protocol whose client is missing here is
-# never stopped, and this script still reports "VPN down." at the end, so the
-# omission looks like success while the tunnel stays up. Each block is a no-op
-# when that client is not running, so adding one is always safe.
-
-if pgrep -x openconnect >/dev/null 2>&1; then
-  echo "Stopping openconnect..."
-  sudo pkill -TERM openconnect || true
-  sleep 1
-  sudo pkill -KILL openconnect 2>/dev/null || true
-fi
-
-if pgrep -x openvpn >/dev/null 2>&1; then
-  echo "Stopping openvpn..."
-  if [[ -f /run/openvpn-client.pid ]]; then
-    sudo kill "$(cat /run/openvpn-client.pid)" 2>/dev/null || true
-  fi
-  sudo pkill -TERM openvpn || true
-  sleep 1
-  sudo pkill -KILL openvpn 2>/dev/null || true
-fi
-
-if pgrep -x openfortivpn >/dev/null 2>&1; then
-  echo "Stopping openfortivpn..."
-  # SIGTERM openfortivpn directly first - lets it close the PPP session
-  # cleanly (logout from gateway, release /dev/ppp) instead of yanking the
-  # screen session out from under it, which can leave /dev/ppp in a state
-  # where the next pppd fails with "Could not set tty to PPP discipline:
-  # Operation not permitted" until the container is restarted.
-  sudo pkill -TERM openfortivpn 2>/dev/null || true
-  sleep 2
-  # Now it is safe to close the (now-empty) screen session
-  sudo screen -S vpn-session -X quit 2>/dev/null || true
-  sleep 1
-  # Fallback: force-kill anything still around
-  sudo pkill -KILL openfortivpn 2>/dev/null || true
-fi
-
-# Sweep up interfaces the clients above left behind - a killed client does not
-# always remove its own link. VPN_INTERFACE covers whatever the container was
-# configured for; the rest are the names the supported clients actually use.
-# Extend this list if a new protocol names its tunnel something else. Deleting
-# a ppp link usually fails because pppd owns it and it disappears with the
-# process, hence the tolerated errors.
-for iface in "$VPN_INTERFACE" vpn0 tun0 ppp0; do
-  if ip link show "$iface" >/dev/null 2>&1; then
-    echo "Deleting $iface..."
-    sudo ip link set "$iface" down 2>/dev/null || true
-    sudo ip link delete "$iface" 2>/dev/null || true
-  fi
-done
-
-echo "VPN down."
-EOF
-chmod +x /usr/local/bin/disconnect-vpn
-'
+install_helpers "$NAME"
 
 echo "==> Passwordless sudo for VPN helpers (${CONTAINER_USER})"
 if [[ "$CONTAINER_USER" != "root" ]]; then
@@ -475,20 +646,9 @@ if [[ "$CONTAINER_USER" != "root" ]]; then
       useradd -m -s /bin/bash '${CONTAINER_USER}'
     fi
     usermod -aG sudo '${CONTAINER_USER}' 2>/dev/null || true
-    # HARDCODED CLIENT LIST (3 of 3) - see docs/adding-a-protocol.md.
-    # Every VPN client binary that connect-vpn / disconnect-vpn invoke under
-    # sudo has to be listed here, or the helpers stall on a password prompt.
-    # A new protocol adds its client (and any wrapper it needs, the way
-    # fortissl needs screen) to this line.
-    #
-    # Deliberately NOT granted: tail. The only sudo tail calls are error-path
-    # log dumps guarded with '|| true', so they degrade to no output instead of
-    # failing, and granting it would hand this user root-read on every file.
-    cat > /etc/sudoers.d/vpn-client <<SUDO
-${CONTAINER_USER} ALL=(root) NOPASSWD: /usr/sbin/openconnect, /usr/local/sbin/openconnect, /usr/sbin/openvpn, /usr/bin/openfortivpn, /usr/bin/screen, /usr/sbin/ip, /usr/bin/ip, /usr/bin/pkill, /usr/bin/kill
-SUDO
-    chmod 440 /etc/sudoers.d/vpn-client
   "
+  # The allowlist itself lives in render_sudoers, shared with --refresh-helpers.
+  install_sudoers "$NAME" "$CONTAINER_USER"
 else
   echo "    (root user - sudo not needed, skipping sudoers setup)"
 fi
@@ -579,6 +739,9 @@ Host <internal-alias>
 
 HTTP via sshuttle (transparent, no per-app proxy config):
   sshuttle -r ${NAME} ${ROUTES//,/ } --dns
+
+After pulling a newer version of this repo, update this container's helpers:
+  ./scripts/create-vpn-lxd-container.sh --name ${NAME} --refresh-helpers
 
 Docs: docs/lxd-vpn-client-containers.md
 EOF

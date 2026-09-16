@@ -134,14 +134,27 @@ binaries, and a protocol introducing a new one has to add itself to both:
 
 Add your client to both lists, and to the interface loop if your tunnel
 device is named something other than `vpn0`/`tun0`/`ppp0`. If your client
-needs a non-obvious teardown (fortissl, for instance, must first quit its
-`screen` session), put it next to the existing per-client blocks.
+needs a non-obvious teardown, put it next to the existing per-client blocks.
+fortissl is the example: it SIGTERMs `openfortivpn`, waits for it to actually
+exit, and only then closes the `screen` session, because closing the session
+first can leave `/dev/ppp` unusable until the container restarts.
 
 Non-root containers need one more line: the sudoers allowlist written for
 `--user` grants NOPASSWD only for the binaries it knows about, so add yours -
 plus any wrapper you invoke under sudo, the way fortissl needs `screen` - if
 the container is meant to run as anything other than `root`. A binary missing
 from that list makes `connect-vpn` hang on a sudo password prompt.
+
+All three lists live in the render functions near the top of the orchestrator
+(`render_connect_vpn`, `render_disconnect_vpn`, `render_sudoers`), and each is
+tagged `HARDCODED CLIENT LIST (N of 3)`:
+
+```bash
+grep -n "HARDCODED CLIENT LIST" scripts/create-vpn-lxd-container.sh
+```
+
+Editing any of them only affects containers created afterwards. Existing
+containers pick the change up with `--refresh-helpers`.
 
 ## What you should NOT need to touch
 

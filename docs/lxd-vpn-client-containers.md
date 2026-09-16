@@ -144,7 +144,9 @@ lxc profile device set vpn-client ppp mode=0660
 lxc restart <container>   # per container using the profile
 ```
 
-**Known issue - "Couldn't set tty to PPP discipline: Operation not permitted":** if a previous `openfortivpn`/`pppd` process was killed abruptly (crash, `lxc stop` while connected, manual `pkill -9`), the kernel can leave `/dev/ppp` in a state where the *next* connection attempt fails with this error, even though everything looks clean (`pgrep openfortivpn` empty, device permissions correct). `disconnect-vpn` sends `SIGTERM` to `openfortivpn` first (clean PPP logout) before touching the screen session, specifically to avoid this. If it still happens: `lxc restart <container>` clears the stuck kernel state and the next `connect-vpn` works. Always prefer `disconnect-vpn` over killing the container/process directly.
+**Known issue - "Couldn't set tty to PPP discipline: Operation not permitted":** if a previous `openfortivpn`/`pppd` process was killed abruptly (crash, `lxc stop` while connected, manual `pkill -9`), the kernel can leave `/dev/ppp` in a state where the *next* connection attempt fails with this error, even though everything looks clean (`pgrep openfortivpn` empty, device permissions correct). `disconnect-vpn` sends `SIGTERM` to `openfortivpn` first (clean PPP logout) and waits up to 15 seconds for it to actually exit before touching the screen session, specifically to avoid this. If the client does not exit in time it is force-killed, and `disconnect-vpn` prints a warning saying so, since that is the case most likely to leave `/dev/ppp` stuck. If it still happens: `lxc restart <container>` clears the stuck kernel state and the next `connect-vpn` works. Always prefer `disconnect-vpn` over killing the container/process directly.
+
+Containers created before this fix still carry the old `disconnect-vpn`, which closed the screen session after a fixed delay. Update them with `--refresh-helpers` (see [Updating helpers in an existing container](#updating-helpers-in-an-existing-container)).
 
 ## Daily workflow
 
@@ -201,6 +203,20 @@ lxc exec vpn-example-anyconnect -- disconnect-vpn
 lxc stop vpn-example-anyconnect
 ```
 
+## Updating helpers in an existing container
+
+`connect-vpn`, `disconnect-vpn` and the sudoers allowlist are generated from this repo when a container is created, and nothing inside the container reads the repo again. So after pulling a newer version, existing containers keep running the old helpers until you refresh them:
+
+```bash
+./scripts/create-vpn-lxd-container.sh --name vpn-example-fortissl --refresh-helpers
+```
+
+- Regenerates `/usr/local/bin/connect-vpn`, `/usr/local/bin/disconnect-vpn` and, for a container created with a non-root `--user`, `/etc/sudoers.d/vpn-client`, from exactly the same source a new container would get.
+- Reads the protocol from the container's `/etc/vpn-client.env`, so `--protocol` is not needed. Passing a different one is refused rather than rebuilding the container with another protocol's helpers.
+- Works on a **stopped** container (it uses `lxc file push`, not `lxc exec`), and leaves it stopped.
+- Does not touch `/etc/vpn-client.env`, installed packages, the openconnect build, or SSH keys. Changes that need any of those still mean recreating the container.
+- The generated scripts are checked with `bash -n`, and the sudoers entry with `visudo -c`, before anything is pushed.
+
 ## Split routes
 
 `connect-vpn` keeps the container default route on `eth0` and only adds `--routes` via the VPN interface. Edit later:
@@ -216,7 +232,7 @@ Written once at creation and sourced by `connect-vpn` / `disconnect-vpn` on ever
 
 | Key | Set for | Meaning |
 |---|---|---|
-| `VPN_PROTOCOL` | all | Which protocol the container was built for. Informational after creation - changing it does not swap the baked-in `connect-vpn` logic. |
+| `VPN_PROTOCOL` | all | Which protocol the container was built for. **Do not edit.** `--refresh-helpers` reads it to decide which protocol's `connect-vpn` to generate, but it installs no packages, so pointing it at another protocol produces a container that cannot connect. Recreate the container instead. |
 | `VPN_ROUTES` | all | Comma-separated split routes, no spaces. `auto` asks the protocol to detect server-pushed routes (anyconnect only); empty means no manual routes. |
 | `VPN_DNS_DOMAIN` | all | Informational only - nothing in `connect-vpn` reads it. |
 | `VPN_INTERFACE` | all | Expected tunnel interface. `vpn0` by default, `ppp0` for fortissl. `connect-vpn` overwrites it at runtime with whatever actually appeared. |
@@ -287,6 +303,8 @@ Or re-run `create-vpn-lxd-container.sh` with a new `--name` / `--protocol`.
 | fortissl: PPP interface never appears | wrong password, or 2FA gateway without `VPN_FORTI_OTP_REQUIRED` set - check `sudo tail /var/log/openfortivpn.log` |
 | `connect-vpn` stops at a sudo password prompt | non-root `--user` and the client is missing from `/etc/sudoers.d/vpn-client` |
 | `disconnect-vpn` says "VPN down." but traffic still flows | client not in `disconnect-vpn`'s known list - see docs/adding-a-protocol.md |
+| a fix from a newer version of this repo has no effect | the container still has the helpers it was created with - `--refresh-helpers` |
+| fortissl: "Couldn't set tty to PPP discipline" on connect | `lxc restart vpn-X`; if the container predates the disconnect fix, also `--refresh-helpers` |
 
 ## Files
 

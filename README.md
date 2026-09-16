@@ -29,6 +29,12 @@ cd vpn-isolation
 
 Full guide: [`docs/lxd-vpn-client-containers.md`](docs/lxd-vpn-client-containers.md)
 
+**After pulling a newer version of this repo**, existing containers keep the helpers they were created with. Update them in place (works on a stopped container, touches nothing else):
+
+```bash
+./scripts/create-vpn-lxd-container.sh --name vpn-example-anyconnect --refresh-helpers
+```
+
 ## Supported protocols
 
 | Protocol | Flag |

@@ -144,6 +144,8 @@ lxc profile device set vpn-client ppp mode=0660
 lxc restart <container>   # per container using the profile
 ```
 
+**Known issue - "Couldn't set tty to PPP discipline: Operation not permitted":** if a previous `openfortivpn`/`pppd` process was killed abruptly (crash, `lxc stop` while connected, manual `pkill -9`), the kernel can leave `/dev/ppp` in a state where the *next* connection attempt fails with this error, even though everything looks clean (`pgrep openfortivpn` empty, device permissions correct). `disconnect-vpn` sends `SIGTERM` to `openfortivpn` first (clean PPP logout) before touching the screen session, specifically to avoid this. If it still happens: `lxc restart <container>` clears the stuck kernel state and the next `connect-vpn` works. Always prefer `disconnect-vpn` over killing the container/process directly.
+
 ## Daily workflow
 
 ### Connect

@@ -435,13 +435,17 @@ fi
 
 if pgrep -x openfortivpn >/dev/null 2>&1; then
   echo "Stopping openfortivpn..."
-  # Quit the screen session first: openfortivpn runs inside it, so killing the
-  # session lets the client tear the PPP link down on its own terms.
+  # SIGTERM openfortivpn directly first - lets it close the PPP session
+  # cleanly (logout from gateway, release /dev/ppp) instead of yanking the
+  # screen session out from under it, which can leave /dev/ppp in a state
+  # where the next pppd fails with "Could not set tty to PPP discipline:
+  # Operation not permitted" until the container is restarted.
+  sudo pkill -TERM openfortivpn 2>/dev/null || true
+  sleep 2
+  # Now it is safe to close the (now-empty) screen session
   sudo screen -S vpn-session -X quit 2>/dev/null || true
   sleep 1
-  # Fallback for a client that outlived its session, or was started by hand.
-  sudo pkill -TERM openfortivpn 2>/dev/null || true
-  sleep 1
+  # Fallback: force-kill anything still around
   sudo pkill -KILL openfortivpn 2>/dev/null || true
 fi
 

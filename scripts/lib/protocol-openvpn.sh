@@ -30,10 +30,8 @@ proto_apt_packages() { echo "openvpn"; }
 # VPN_OVPN is the path INSIDE the container, which is where connect-vpn runs;
 # the host-side --ovpn path is only used by proto_post_install below.
 proto_write_env_extra() {
-  cat <<EOF
-VPN_OVPN=/etc/openvpn/client/client.ovpn
-VPN_ROUTE_NOPULL=${ROUTE_NOPULL}
-EOF
+  env_kv VPN_OVPN /etc/openvpn/client/client.ovpn
+  env_kv VPN_ROUTE_NOPULL "$ROUTE_NOPULL"
 }
 
 # proto_post_install: orchestrator-side hook (runs on the host, not inside

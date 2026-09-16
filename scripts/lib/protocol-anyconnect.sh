@@ -28,9 +28,9 @@ proto_apt_packages() { echo "openconnect vpnc-scripts"; }
 # proto_write_env_extra NAME: extra KEY=VALUE lines appended to
 # /etc/vpn-client.env, one per line on stdout.
 proto_write_env_extra() {
-  cat <<EOF
-VPN_GATEWAY=${GATEWAY}
-EOF
+  # env_kv (defined by the orchestrator) shell-quotes the value, so a gateway
+  # path with spaces or shell metacharacters survives `source` intact.
+  env_kv VPN_GATEWAY "$GATEWAY"
 }
 
 # proto_connect_snippet: bash function body (as text) injected into the

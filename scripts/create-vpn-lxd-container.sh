@@ -96,10 +96,12 @@ Protocol-specific:
 
 Optional:
   --routes CIDRS           Comma-separated split routes (e.g. 10.1.0.0/16,10.2.0.0/24).
-                            Defaults to 'auto': ask the protocol to detect the
-                            server-pushed routes after connecting (implemented for
-                            anyconnect; other protocols add no manual routes).
-                            Editable later in /etc/vpn-client.env.
+                            Each entry needs an explicit prefix (/32 for one
+                            host) and no host bits set; checked before anything
+                            is created. Defaults to 'auto': ask the protocol to
+                            detect the server-pushed routes after connecting
+                            (implemented for anyconnect; other protocols add no
+                            manual routes). Editable later in /etc/vpn-client.env.
   --dns-domain DOMAIN      Informational / helper default domain
   --user USER              Container login user (default: root - always exists;
                             if set to a non-root user that doesn't exist yet,
@@ -340,6 +342,144 @@ install_sudoers() {
     "${HELPER_WORK_DIR}/vpn-client" "${name}/etc/sudoers.d/vpn-client" >/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# /etc/vpn-client.env
+#
+# connect-vpn and disconnect-vpn `source` this file, so every value in it is
+# shell syntax, not plain text. Values come straight from the command line
+# (--gateway, --dns-domain, --forti-user, ...), and a value written raw breaks
+# in ways that are silent at creation time and only surface on the first
+# connect: a space makes `source` run the rest of the value as a command, an
+# apostrophe makes the whole file fail to load, and `$(...)` or backticks get
+# executed.
+#
+# The file used to be written with `lxc exec ... bash -lc "cat <<EOF ..."`,
+# which expanded each value twice - once in the host's double quotes and again
+# in the container's unquoted heredoc - so a `$(...)` in a value actually ran,
+# as root, inside the container while the file was being written. It is now
+# rendered on the host and copied in with `lxc file push`, which does no
+# expansion at all.
+# ---------------------------------------------------------------------------
+
+# env_kv KEY VALUE - print one assignment, quoted so that `source` yields VALUE
+# back byte for byte.
+#
+# Values made only of characters that are literal in an assignment (hostnames,
+# paths, CIDR lists, numbers) are written bare, exactly as before, so the file
+# stays easy to read and edit by hand. Anything else is single-quoted, with any
+# embedded single quote written as '\''. Inside single quotes bash treats every
+# byte literally - spaces, $, backticks, newlines - so nothing is expanded.
+# `printf %q` is deliberately not used: it also escapes harmless characters
+# such as commas, turning VPN_ROUTES=a,b into VPN_ROUTES=a\,b.
+#
+# Protocol plugins call this from proto_write_env_extra, so it is part of the
+# plugin contract - see docs/adding-a-protocol.md.
+env_kv() {
+  local key="$1" value="$2"
+  if [[ "$value" =~ ^[A-Za-z0-9._/:,@%+=-]*$ ]]; then
+    printf '%s=%s\n' "$key" "$value"
+  else
+    printf "%s='%s'\n" "$key" "${value//\'/\'\\\'\'}"
+  fi
+}
+
+# render_env_file - print /etc/vpn-client.env for the current configuration.
+render_env_file() {
+  echo "# Managed by create-vpn-lxd-container.sh"
+  env_kv VPN_PROTOCOL "$PROTOCOL"
+  env_kv VPN_ROUTES "$ROUTES"
+  env_kv VPN_DNS_DOMAIN "$DNS_DOMAIN"
+  env_kv VPN_INTERFACE "$VPN_IFACE"
+  proto_write_env_extra
+}
+
+# install_env_file NAME - render /etc/vpn-client.env and push it.
+install_env_file() {
+  local name="$1"
+  helper_work_dir
+  render_env_file > "${HELPER_WORK_DIR}/vpn-client.env"
+  if ! bash -n "${HELPER_WORK_DIR}/vpn-client.env"; then
+    echo "ERROR: generated /etc/vpn-client.env does not parse; not installing it." >&2
+    exit 1
+  fi
+  # 0644 on purpose: this file is configuration only and never holds a password
+  # or token (those are prompted for on every connect). Any protocol that would
+  # need a secret in here must not put it in this file.
+  lxc file push --uid 0 --gid 0 --mode 0644 \
+    "${HELPER_WORK_DIR}/vpn-client.env" "${name}/etc/vpn-client.env" >/dev/null
+}
+
+# validate_routes LIST - exit 1 with a specific message unless LIST is "auto" or
+# a comma-separated list of CIDRs that `ip route replace` will take as-is.
+#
+# This matters more than it looks: apply_split_routes tolerates `ip route`
+# failures (`|| true`), so a malformed or host-bits-set entry does not fail the
+# connect - the route is silently missing and internal hosts just time out.
+# Catching it here, on the host and before any lxc call, turns that into an
+# error at the moment the typo is made.
+validate_routes() {
+  local list="$1" cidr addr prefix a b c d ip mask net
+  [[ "$list" == "auto" ]] && return 0
+
+  if [[ -z "$list" || "$list" == ,* || "$list" == *, || "$list" == *,,* ]]; then
+    echo "ERROR: --routes '${list}' has an empty entry (check for stray commas)." >&2
+    exit 1
+  fi
+
+  local -a items
+  IFS=',' read -ra items <<< "$list"
+  for cidr in "${items[@]}"; do
+    if [[ "$cidr" == "auto" ]]; then
+      echo "ERROR: --routes: 'auto' cannot be combined with explicit CIDRs." >&2
+      exit 1
+    fi
+    if [[ "$cidr" != */* ]]; then
+      echo "ERROR: --routes: '${cidr}' has no prefix length. For a single host use '${cidr}/32'." >&2
+      exit 1
+    fi
+    addr="${cidr%/*}"
+    prefix="${cidr##*/}"
+
+    if [[ "$addr" == *:* ]]; then
+      # IPv6: shape and prefix range only. Full validation is not worth doing
+      # in bash; this still catches separators and stray characters.
+      if [[ ! "$addr" =~ ^[0-9a-fA-F:]+$ || "$addr" == *:::* \
+            || ! "$prefix" =~ ^(0|[1-9][0-9]{0,2})$ ]] || (( prefix > 128 )); then
+        echo "ERROR: --routes: '${cidr}' is not a valid IPv6 CIDR." >&2
+        exit 1
+      fi
+      continue
+    fi
+
+    # IPv4. Leading zeros are rejected: some tools read them as octal.
+    if [[ ! "$addr" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]]; then
+      echo "ERROR: --routes: '${cidr}' is not a valid IPv4 CIDR." >&2
+      exit 1
+    fi
+    a="${BASH_REMATCH[1]}"; b="${BASH_REMATCH[2]}"; c="${BASH_REMATCH[3]}"; d="${BASH_REMATCH[4]}"
+    if (( a > 255 || b > 255 || c > 255 || d > 255 )); then
+      echo "ERROR: --routes: '${cidr}' has an octet above 255." >&2
+      exit 1
+    fi
+    if [[ ! "$prefix" =~ ^(0|[1-9][0-9]?)$ ]] || (( prefix > 32 )); then
+      echo "ERROR: --routes: '${cidr}' has an invalid prefix length (0-32)." >&2
+      exit 1
+    fi
+
+    # `ip route` rejects a network with host bits set ("Invalid prefix for
+    # given prefix length"), and apply_split_routes would swallow that error.
+    ip=$(( (a << 24) | (b << 16) | (c << 8) | d ))
+    mask=$(( prefix == 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
+    if (( (ip & ~mask) & 0xFFFFFFFF )); then
+      net=$(( ip & mask ))
+      printf "ERROR: --routes: '%s' has host bits set. Did you mean %d.%d.%d.%d/%s?\n" \
+        "$cidr" $(( (net >> 24) & 255 )) $(( (net >> 16) & 255 )) \
+        $(( (net >> 8) & 255 )) $(( net & 255 )) "$prefix" >&2
+      exit 1
+    fi
+  done
+}
+
 # ROUTE_NOPULL / FORTI_USER / FORTI_PORT are assigned here but read only by the
 # protocol lib sourced further down, which shellcheck cannot follow.
 # shellcheck disable=SC2034
@@ -470,6 +610,11 @@ teardown.
 EOF
   exit 0
 fi
+
+# Whitespace cannot be part of a CIDR, so strip it rather than reject
+# "10.1.0.0/16, 10.2.0.0/24" - the stored value is then the canonical form.
+ROUTES="${ROUTES//[[:space:]]/}"
+validate_routes "$ROUTES"
 
 proto_validate_args
 
@@ -611,25 +756,12 @@ if [[ "$BUILD_OPENCONNECT" -eq 1 ]]; then
 fi
 
 echo "==> Writing /etc/vpn-client.env"
-ENV_EXTRA="$(proto_write_env_extra)"
 # Allow protocol to override the default interface name (e.g. fortissl needs ppp0)
 VPN_IFACE="vpn0"
 if declare -f proto_write_env_interface >/dev/null 2>&1; then
   VPN_IFACE="$(proto_write_env_interface)"
 fi
-lxc exec "$NAME" -- bash -lc "cat > /etc/vpn-client.env <<EOF
-# Managed by create-vpn-lxd-container.sh
-VPN_PROTOCOL=${PROTOCOL}
-VPN_ROUTES=${ROUTES}
-VPN_DNS_DOMAIN=${DNS_DOMAIN}
-VPN_INTERFACE=${VPN_IFACE}
-${ENV_EXTRA}
-EOF
-# 0644 on purpose: this file is configuration only and never holds a password
-# or token (those are prompted for on every connect). Any protocol that would
-# need a secret in here must not put it in this file.
-chmod 644 /etc/vpn-client.env
-"
+install_env_file "$NAME"
 
 # Optional protocol-side host hook (e.g. openvpn pushing the .ovpn profile)
 if declare -f proto_post_install >/dev/null 2>&1; then
@@ -709,6 +841,16 @@ lxc exec "$NAME" -- systemctl enable --now ssh >/dev/null
 IP="$(lxc list "$NAME" -c 4 --format csv 2>/dev/null | head -1 | awk -F, '{print $1}' | awk '{print $1}')"
 TOOL_VER="$(lxc exec "$NAME" -- bash -c "$(proto_version_cmd)" 2>/dev/null || echo unknown)"
 
+# With --routes auto the CIDRs are only known after the first connect, so do
+# not print "auto" as if it were a subnet sshuttle could use.
+if [[ "$ROUTES" == "auto" ]]; then
+  ROUTES_SUMMARY="auto (detected at connect time; connect-vpn prints them)"
+  SSHUTTLE_ROUTES="<cidrs printed by connect-vpn>"
+else
+  ROUTES_SUMMARY="$ROUTES"
+  SSHUTTLE_ROUTES="${ROUTES//,/ }"
+fi
+
 cat <<EOF
 
 ============================================================
@@ -716,7 +858,7 @@ Container ready: ${NAME}
   Protocol     : ${PROTOCOL}
   IP on lxdbr0 : ${IP:-<pending - run: lxc list ${NAME}>}
   Gateway/ovpn : ${GATEWAY:-${OVPN}}
-  Split routes : ${ROUTES:-auto-detect}
+  Split routes : ${ROUTES_SUMMARY}
   Client       : ${TOOL_VER}
 ============================================================
 
@@ -738,7 +880,7 @@ Host <internal-alias>
   ProxyJump ${NAME}
 
 HTTP via sshuttle (transparent, no per-app proxy config):
-  sshuttle -r ${NAME} ${ROUTES//,/ } --dns
+  sshuttle -r ${NAME} ${SSHUTTLE_ROUTES} --dns
 
 After pulling a newer version of this repo, update this container's helpers:
   ./scripts/create-vpn-lxd-container.sh --name ${NAME} --refresh-helpers

@@ -33,9 +33,9 @@ proto_apt_packages() { echo "openconnect vpnc-scripts"; }
 # Host-side globals are not visible inside the container, so anything the
 # connect snippet needs has to be handed over through /etc/vpn-client.env.
 proto_write_env_extra() {
-  cat <<EOF
-VPN_GATEWAY=${GATEWAY}
-EOF
+  # env_kv (defined by the orchestrator) shell-quotes the value, so a gateway
+  # path with spaces or shell metacharacters survives `source` intact.
+  env_kv VPN_GATEWAY "$GATEWAY"
 }
 
 # proto_connect_snippet: emits the proto_connect function as TEXT, spliced into

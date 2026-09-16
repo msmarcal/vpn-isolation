@@ -219,16 +219,24 @@ lxc stop vpn-example-anyconnect
 
 ## Split routes
 
-`connect-vpn` keeps the container default route on `eth0` and only adds `--routes` via the VPN interface. Edit later:
+`connect-vpn` keeps the container default route on `eth0` and only adds `--routes` via the VPN interface.
+
+`--routes` is validated on the host before anything is created. Each entry needs an explicit prefix length (`/32` for a single host) and must be a network address, with no host bits set: `10.10.1.0/16` is rejected with a suggestion of `10.10.0.0/16`. Spaces around commas are removed. This check exists because `ip route` refuses such entries and `connect-vpn` tolerates route errors, so a bad entry would otherwise just be a silently missing route and internal hosts that time out.
+
+Edit later:
 
 ```bash
 lxc exec vpn-example-anyconnect -- vim /etc/vpn-client.env
 # VPN_ROUTES=10.10.0.0/24,10.20.0.0/24
 ```
 
+Hand edits skip that validation, so double-check the format. After `connect-vpn`, compare the "Relevant routes" it prints against what you set.
+
 ## `/etc/vpn-client.env` reference
 
 Written once at creation and sourced by `connect-vpn` / `disconnect-vpn` on every run, so editing it is the supported way to change a container's behavior after the fact. No restart needed - the next `connect-vpn` picks up the new values.
+
+Because the file is `source`d, it is shell syntax. Plain values (hostnames, paths, CIDR lists) are written bare; any value with a space, quote, `$` or other shell character is written in single quotes, e.g. `VPN_GATEWAY='vpn.example.com/my group'`. Keep that quoting when editing by hand.
 
 | Key | Set for | Meaning |
 |---|---|---|

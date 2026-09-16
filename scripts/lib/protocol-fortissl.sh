@@ -20,15 +20,17 @@ proto_needs_build_openconnect() { echo 0; }
 proto_apt_packages() { echo "openfortivpn screen"; }
 
 proto_write_env_extra() {
-  cat <<EOF
-VPN_GATEWAY=${GATEWAY}
-VPN_FORTI_USER=${FORTI_USER:-}
-VPN_FORTI_PORT=${FORTI_PORT:-443}
+  # env_kv (defined by the orchestrator) shell-quotes each value, so a username
+  # like o'brien does not break `source` in connect-vpn.
+  env_kv VPN_GATEWAY "$GATEWAY"
+  env_kv VPN_FORTI_USER "${FORTI_USER:-}"
+  env_kv VPN_FORTI_PORT "${FORTI_PORT:-443}"
+  cat <<'EOF'
 # Set to any non-empty value if the gateway requires OTP/2FA. connect-vpn then
 # prompts for the token and passes it to openfortivpn as --otp. Left empty on
 # creation because there is no way to probe the gateway for this beforehand.
-VPN_FORTI_OTP_REQUIRED=
 EOF
+  env_kv VPN_FORTI_OTP_REQUIRED ""
 }
 
 # proto_write_env_interface: override the default VPN_INTERFACE for this protocol.

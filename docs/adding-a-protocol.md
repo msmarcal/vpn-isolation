@@ -37,9 +37,15 @@ proto_apt_packages() { echo "some-client-package"; }
 # Print (stdout) extra KEY=VALUE lines to append to the container's
 # /etc/vpn-client.env. Has access to orchestrator globals (GATEWAY, OVPN,
 # ROUTE_NOPULL, etc).
-proto_write_env_extra() { cat <<EOF
-VPN_SOMETHING=${SOME_GLOBAL}
-EOF
+#
+# Emit every assignment with `env_kv KEY VALUE`, which the orchestrator
+# defines. connect-vpn `source`s this file, so a value written raw is shell
+# code: a space in it runs the rest as a command, an apostrophe breaks the
+# whole file, and `$(...)` executes. env_kv quotes the value only when needed,
+# so plain values still read naturally. Comment lines can be printed with a
+# quoted heredoc (`cat <<'EOF'`).
+proto_write_env_extra() {
+  env_kv VPN_SOMETHING "$SOME_GLOBAL"
 }
 
 # Print (stdout) a bash function definition named exactly `proto_connect`.

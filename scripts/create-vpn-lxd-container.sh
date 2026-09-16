@@ -79,6 +79,9 @@ FORTI_USER=""    # fortissl
 # shellcheck disable=SC2034
 FORTI_PORT=""    # fortissl
 
+# usage - print help on stdout. It does not exit: --help ends with status 0,
+# while argument errors send the same text to stderr and end with status 1, so
+# a wrapper can tell asking for help apart from calling the script wrong.
 usage() {
   cat <<EOF
 Usage:
@@ -126,7 +129,6 @@ Optional:
 Adding a new protocol: see docs/adding-a-protocol.md - no changes to this
 file are required, just drop scripts/lib/protocol-<name>.sh.
 EOF
-  exit 1
 }
 
 # ---------------------------------------------------------------------------
@@ -502,14 +504,15 @@ while [[ $# -gt 0 ]]; do
     --forti-user) FORTI_USER="${2:-}"; shift 2 ;;
     --forti-port) FORTI_PORT="${2:-}"; shift 2 ;;
     --refresh-helpers) REFRESH_HELPERS=1; shift ;;
-    -h|--help) usage ;;
-    *) echo "Unknown arg: $1" >&2; usage ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
 
 if [[ -z "$NAME" ]]; then
   echo "ERROR: --name is required." >&2
-  usage
+  usage >&2
+  exit 1
 fi
 
 # --refresh-helpers: the container already exists and already knows which
@@ -545,7 +548,8 @@ fi
 
 if [[ -z "$PROTOCOL" ]]; then
   echo "ERROR: --protocol is required." >&2
-  usage
+  usage >&2
+  exit 1
 fi
 
 # The protocol name becomes part of a path that gets sourced. In refresh mode it

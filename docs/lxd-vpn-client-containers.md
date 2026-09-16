@@ -42,7 +42,7 @@ Daily use is SSH + occasional HTTP/HTTPS. No RDP/VNC required.
 chmod +x scripts/create-vpn-lxd-container.sh
 ```
 
-The create script ensures profile `vpn-client` exists (`eth0` on `lxdbr0`, `/dev/net/tun`, nesting).
+The create script ensures profile `vpn-client` exists (`eth0` on `lxdbr0`, `/dev/net/tun`, `/dev/ppp` mode 0660). It does not enable `security.nesting`: nothing here runs a container inside the container, and tun, ppp and split routing were verified to work without it.
 
 ## Create containers
 

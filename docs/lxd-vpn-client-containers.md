@@ -294,6 +294,53 @@ lxc exec vpn-newproject -- vim /etc/vpn-client.env
 
 Or re-run `create-vpn-lxd-container.sh` with a new `--name` / `--protocol`.
 
+## GlobalProtect with SAML SSO + 2FA (Duo etc)
+
+Some GlobalProtect portals are configured for SAML SSO (redirecting to an
+ADFS/Okta/Azure AD login page, often with Duo push/code as a second factor)
+instead of a native username/password form. `openconnect --protocol=gp`
+cannot complete that login on its own - the server never returns the XML
+`<auth>` form it expects, it returns an HTML/JS login page instead, and
+`connect-vpn` fails immediately with:
+
+```
+XML response has no "auth" node
+Failed to complete authentication
+```
+
+Duo happens inside that SAML/ADFS exchange, so openconnect never even reaches
+the point of asking for a second factor.
+
+Containers created with `--protocol gp` get two extra helper scripts for this
+case, alongside the normal `connect-vpn`:
+
+```bash
+# Step 1 - ask openconnect for the SAML login URL
+lxc exec vpn-X -- connect-vpn-saml
+# prints a long https://sts.<company>.com/adfs/ls/... URL
+
+# Step 2 - open that URL in a browser OUTSIDE the container (your laptop),
+# log in normally and approve the Duo prompt. Then, in browser DevTools ->
+# Network tab, find the POST to .../SAML20/SP/ACS (or similar) and copy two
+# values from its response: prelogin-cookie (sometimes portal-userauthcookie)
+# and saml-username.
+
+# Step 3 - feed those values back in to finish the handshake
+lxc exec vpn-X -- connect-vpn-saml-finish "<prelogin-cookie>" "<saml-username>"
+```
+
+Notes:
+- The prelogin-cookie is short-lived - if `connect-vpn-saml-finish` reports
+  the tunnel interface never appeared, the cookie likely expired; repeat from
+  `connect-vpn-saml`.
+- Both scripts default to `--usergroup=gateway[:prelogin-cookie]`; pass
+  `portal` (step 1) / `portal:portal-userauthcookie` (step 3, as the optional
+  3rd argument) if your portal uses the portal path instead of the gateway
+  path - the SAML URL output or your IT team's GlobalProtect docs will tell
+  you which one applies.
+- Plain (non-SAML) GlobalProtect portals are unaffected - they keep working
+  with the normal `connect-vpn`.
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -302,6 +349,7 @@ Or re-run `create-vpn-lxd-container.sh` with a new `--name` / `--protocol`.
 | Cisco/ASA auth 404 on `/` | rebuild openconnect (`--build-openconnect`) |
 | MFA/token login failed before token prompt | account lockout - wait / ask the VPN provider's IT |
 | GlobalProtect stuck on portal | confirm portal vs gateway URL; try `-v` |
+| GlobalProtect: `XML response has no "auth" node` | Portal is SAML-fronted (ADFS/Okta/Azure AD, often with Duo/2FA) - plain openconnect cannot finish that login. Use `connect-vpn-saml` then `connect-vpn-saml-finish` (installed alongside `connect-vpn` for `--protocol gp` containers) - see "GlobalProtect with SAML SSO + 2FA (Duo etc)" below |
 | OpenVPN connects but no internal access | subnet missing from `VPN_ROUTES`; or server pushes a different topology |
 | SSH timeout to internal host | VPN up? `lxc exec vpn-X -- ip route` |
 | host DNS/routes broken | VPN was started on the host - stop it and delete leftover `vpn0` |

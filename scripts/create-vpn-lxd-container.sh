@@ -254,6 +254,34 @@ if [[ "$REFRESH_HELPERS" -eq 1 ]]; then
     echo "    no /etc/sudoers.d/vpn-client (root container); sudoers left alone"
   fi
 
+  # Optional protocol-side host hook (e.g. gp re-pushing the SAML helper
+  # scripts). Same declare -f guard as the creation path below - most
+  # protocols don't define this. Re-running it here is what makes
+  # --refresh-helpers actually pick up hook-installed files added to a
+  # protocol lib after the container was first created; skipping it entirely
+  # (the previous behavior) silently left those files missing from any
+  # container refreshed instead of recreated.
+  #
+  # NOT safe to run unconditionally: protocol-openvpn.sh's hook needs $OVPN,
+  # a host-side file path that only --ovpn on the command line provides and
+  # that refresh mode never recovers (only VPN_PROTOCOL is read back from the
+  # container - see ENV_PROTOCOL above). Running it here with $OVPN unset
+  # would `lxc file push` a missing/empty path over the container's working
+  # profile. Gate on the protocol actually needing host args instead of
+  # guessing generically; add a name to NEEDS_HOST_ARGS_FOR_POST_INSTALL if a
+  # future protocol's proto_post_install grows the same dependency.
+  NEEDS_HOST_ARGS_FOR_POST_INSTALL=(openvpn)
+  if declare -f proto_post_install >/dev/null 2>&1; then
+    if [[ " ${NEEDS_HOST_ARGS_FOR_POST_INSTALL[*]} " == *" ${PROTOCOL} "* ]]; then
+      echo "    NOTE: protocol=${PROTOCOL} needs host-side args (e.g. --ovpn) that" >&2
+      echo "    --refresh-helpers cannot recover; its proto_post_install step was" >&2
+      echo "    skipped. Re-run the full create command (delete + recreate) if it" >&2
+      echo "    also needs updating." >&2
+    else
+      proto_post_install "$NAME"
+    fi
+  fi
+
   cat <<EOF
 
 Done. /etc/vpn-client.env, packages and SSH keys were not touched.

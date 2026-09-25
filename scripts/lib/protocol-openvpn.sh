@@ -27,6 +27,13 @@ proto_needs_build_openconnect() { echo 0; }
 
 proto_apt_packages() { echo "openvpn"; }
 
+# Process name(s) connect-vpn refuses to start over and disconnect-vpn stops.
+proto_client_processes() { echo "openvpn"; }
+
+# Absolute paths a non-root --user container may run under sudo for this
+# protocol. Add any wrapper the snippets invoke with sudo as well.
+proto_sudo_commands() { echo "/usr/sbin/openvpn"; }
+
 # VPN_OVPN is the path INSIDE the container, which is where connect-vpn runs;
 # the host-side --ovpn path is only used by proto_post_install below.
 proto_write_env_extra() {

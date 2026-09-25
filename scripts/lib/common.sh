@@ -50,3 +50,21 @@ wait_for_iface() {
   done
   return 1
 }
+
+# stop_client NAME [TIMEOUT]
+# Sends SIGTERM to every process named NAME, waits up to TIMEOUT seconds (5 by
+# default) for them to exit, then SIGKILLs whatever is left. Returns 1 when the
+# kill was needed, so a protocol teardown can add a client-specific hint.
+stop_client() {
+  local name="$1" timeout="${2:-5}"
+  pgrep -x "$name" >/dev/null 2>&1 || return 0
+  echo "Stopping ${name}..."
+  sudo pkill -TERM "$name" 2>/dev/null || true
+  for _ in $(seq 1 "$timeout"); do
+    pgrep -x "$name" >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  echo "${name} did not exit within ${timeout}s of SIGTERM; killing it." >&2
+  sudo pkill -KILL "$name" 2>/dev/null || true
+  return 1
+}

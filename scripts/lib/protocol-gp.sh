@@ -30,6 +30,13 @@ proto_needs_build_openconnect() { echo 1; }
 # runs to configure the tunnel interface and the server-pushed routes.
 proto_apt_packages() { echo "openconnect vpnc-scripts"; }
 
+# Process name(s) connect-vpn refuses to start over and disconnect-vpn stops.
+proto_client_processes() { echo "openconnect"; }
+
+# Absolute paths a non-root --user container may run under sudo for this
+# protocol. Add any wrapper the snippets invoke with sudo as well.
+proto_sudo_commands() { echo "/usr/sbin/openconnect /usr/local/sbin/openconnect"; }
+
 # Host-side globals are not visible inside the container, so anything the
 # connect snippet needs has to be handed over through /etc/vpn-client.env.
 proto_write_env_extra() {

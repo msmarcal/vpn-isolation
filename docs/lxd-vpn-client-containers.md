@@ -307,8 +307,8 @@ Or re-run `create-vpn-lxd-container.sh` with a new `--name` / `--protocol`.
 | host DNS/routes broken | VPN was started on the host - stop it and delete leftover `vpn0` |
 | fortissl: "requires interactive password entry" | missing `-t`: use `lxc exec -t vpn-X -- connect-vpn` |
 | fortissl: PPP interface never appears | wrong password, or 2FA gateway without `VPN_FORTI_OTP_REQUIRED` set - check `sudo tail /var/log/openfortivpn.log` |
-| `connect-vpn` stops at a sudo password prompt | non-root `--user` and the client is missing from `/etc/sudoers.d/vpn-client` |
-| `disconnect-vpn` says "VPN down." but traffic still flows | client not in `disconnect-vpn`'s known list - see docs/adding-a-protocol.md |
+| `connect-vpn` stops at a sudo password prompt | non-root `--user` and a path is missing from the plugin's `proto_sudo_commands`; fix, then `--refresh-helpers` |
+| `disconnect-vpn` says "VPN down." but traffic still flows | a process name is missing from the plugin's `proto_client_processes`; fix, then `--refresh-helpers` |
 | a fix from a newer version of this repo has no effect | the container still has the helpers it was created with - `--refresh-helpers` |
 | fortissl: "Couldn't set tty to PPP discipline" on connect | `lxc restart vpn-X`; if the container predates the disconnect fix, also `--refresh-helpers` |
 

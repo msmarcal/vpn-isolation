@@ -19,6 +19,13 @@ proto_needs_build_openconnect() { echo 0; }
 
 proto_apt_packages() { echo "openfortivpn screen"; }
 
+# Process name(s) connect-vpn refuses to start over and disconnect-vpn stops.
+proto_client_processes() { echo "openfortivpn"; }
+
+# Absolute paths a non-root --user container may run under sudo for this
+# protocol. Add any wrapper the snippets invoke with sudo as well.
+proto_sudo_commands() { echo "/usr/bin/openfortivpn /usr/bin/screen"; }
+
 proto_write_env_extra() {
   # env_kv (defined by the orchestrator) shell-quotes each value, so a username
   # like o'brien does not break `source` in connect-vpn.
@@ -126,6 +133,24 @@ EOF
 }
 
 proto_version_cmd() { echo "openfortivpn --version 2>&1 | head -1"; }
+
+# proto_disconnect_snippet: the generic teardown (stop_client on each process)
+# is not enough here, because openfortivpn runs inside a screen session that
+# has to be closed too - and only AFTER the client is gone.
+proto_disconnect_snippet() {
+  cat <<'EOF'
+proto_disconnect() {
+  # SIGTERM first and wait, so openfortivpn logs out of the gateway and
+  # releases /dev/ppp itself. Closing the screen session while it is still
+  # tearing down, or force-killing it, can leave /dev/ppp unusable ("Could not
+  # set tty to PPP discipline") until the container is restarted.
+  if ! stop_client openfortivpn 15; then
+    echo "If the next connect fails with a PPP discipline error, run: lxc restart <container>" >&2
+  fi
+  sudo screen -S vpn-session -X quit 2>/dev/null || true
+}
+EOF
+}
 
 # Optional orchestrator-side hook for any extra setup. Not needed for FortiSSL
 # (no profile files to push like OpenVPN does), but defined here for reference.

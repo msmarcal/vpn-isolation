@@ -68,16 +68,17 @@ HEADER
   echo
   echo "# ---- protocol implementation (scripts/lib/protocol-${PROTOCOL}.sh) ----"
   proto_connect_snippet
+  # Refuse to start on top of a live tunnel. The process names come from the
+  # plugin (proto_client_processes), as do the ones disconnect-vpn stops.
+  # $p is meant literally here: it expands inside the container.
+  # shellcheck disable=SC2016
+  printf '\nfor p in %s; do\n' "$(proto_client_processes)"
   cat <<'RUNNER'
-
-# HARDCODED CLIENT LIST (1 of 3) - a new protocol must add its client binary
-# here, in disconnect-vpn, and in the sudoers allowlist. A client missing from
-# this guard lets a second connect-vpn start on top of a live tunnel.
-# See docs/adding-a-protocol.md.
-if pgrep -x openconnect >/dev/null 2>&1 || pgrep -x openvpn >/dev/null 2>&1 || pgrep -x openfortivpn >/dev/null 2>&1; then
-  echo "A VPN client is already running. Run disconnect-vpn first." >&2
-  exit 1
-fi
+  if pgrep -x "$p" >/dev/null 2>&1; then
+    echo "A VPN client ($p) is already running. Run disconnect-vpn first." >&2
+    exit 1
+  fi
+done
 
 proto_connect
 
@@ -89,68 +90,41 @@ ip route | grep -E "${VPN_INTERFACE}|$(echo "$VPN_ROUTES" | tr "," "|")" || ip r
 RUNNER
 }
 
-# render_disconnect_vpn - print the in-container disconnect-vpn. It is the same
-# for every protocol. The quoted heredoc delimiter keeps $VPN_INTERFACE and
-# friends literal, so they expand inside the container at disconnect time.
+# render_disconnect_vpn - print the in-container disconnect-vpn for $PROTOCOL.
+# Like connect-vpn it carries common.sh verbatim, then the plugin's teardown:
+# proto_disconnect_snippet when the plugin defines one (fortissl needs to close
+# its screen session), otherwise a generic proto_disconnect that runs
+# stop_client on each name from proto_client_processes.
 render_disconnect_vpn() {
-  cat <<'EOF'
+  cat <<'HEADER'
 #!/usr/bin/env bash
 set -euo pipefail
 ENV_FILE=/etc/vpn-client.env
 [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
 VPN_INTERFACE="${VPN_INTERFACE:-vpn0}"
 
-# HARDCODED CLIENT LIST (2 of 3) - see docs/adding-a-protocol.md.
-# One block per known client binary. A protocol whose client is missing here is
-# never stopped, and this script still reports "VPN down." at the end, so the
-# omission looks like success while the tunnel stays up. Each block is a no-op
-# when that client is not running, so adding one is always safe.
-
-if pgrep -x openconnect >/dev/null 2>&1; then
-  echo "Stopping openconnect..."
-  sudo pkill -TERM openconnect || true
-  sleep 1
-  sudo pkill -KILL openconnect 2>/dev/null || true
-fi
-
-if pgrep -x openvpn >/dev/null 2>&1; then
-  echo "Stopping openvpn..."
-  if [[ -f /run/openvpn-client.pid ]]; then
-    sudo kill "$(cat /run/openvpn-client.pid)" 2>/dev/null || true
+HEADER
+  echo "# ---- shared helpers (copied verbatim from scripts/lib/common.sh) ----"
+  cat "${LIB_DIR}/common.sh"
+  echo
+  echo "# ---- protocol teardown (scripts/lib/protocol-${PROTOCOL}.sh) ----"
+  if declare -f proto_disconnect_snippet >/dev/null 2>&1; then
+    proto_disconnect_snippet
+  else
+    # $p is meant literally here: it expands inside the container.
+    # shellcheck disable=SC2016
+    printf 'proto_disconnect() {\n  local p\n  for p in %s; do\n    stop_client "$p" || true\n  done\n}\n' \
+      "$(proto_client_processes)"
   fi
-  sudo pkill -TERM openvpn || true
-  sleep 1
-  sudo pkill -KILL openvpn 2>/dev/null || true
-fi
+  cat <<'FOOTER'
 
-if pgrep -x openfortivpn >/dev/null 2>&1; then
-  echo "Stopping openfortivpn..."
-  # SIGTERM first and wait for it to exit, so it logs out of the gateway and
-  # releases /dev/ppp itself. Closing the screen session while it is still
-  # tearing down can leave /dev/ppp unusable ("Could not set tty to PPP
-  # discipline") until the container is restarted. Give up after 15 seconds.
-  sudo pkill -TERM openfortivpn 2>/dev/null || true
-  for _ in $(seq 1 15); do
-    pgrep -x openfortivpn >/dev/null 2>&1 || break
-    sleep 1
-  done
-  # Now it is safe to close the (now-empty) screen session
-  sudo screen -S vpn-session -X quit 2>/dev/null || true
-  # Fallback: force-kill anything still around, and say so - a forced kill is
-  # the case that can leave /dev/ppp stuck and need an lxc restart.
-  if pgrep -x openfortivpn >/dev/null 2>&1; then
-    echo "openfortivpn did not exit within 15s of SIGTERM; killing it." >&2
-    echo "If the next connect fails with a PPP discipline error, run: lxc restart <container>" >&2
-    sudo pkill -KILL openfortivpn 2>/dev/null || true
-  fi
-fi
+proto_disconnect
 
-# Sweep up interfaces the clients above left behind - a killed client does not
-# always remove its own link. VPN_INTERFACE covers whatever the container was
+# Sweep up interfaces the client left behind - a killed client does not always
+# remove its own link. VPN_INTERFACE covers whatever the container was
 # configured for; the rest are the names the supported clients actually use.
-# Extend this list if a new protocol names its tunnel something else. Deleting
-# a ppp link usually fails because pppd owns it and it disappears with the
-# process, hence the tolerated errors.
+# Deleting a ppp link usually fails because pppd owns it and it disappears with
+# the process, hence the tolerated errors.
 for iface in "$VPN_INTERFACE" vpn0 tun0 ppp0; do
   if ip link show "$iface" >/dev/null 2>&1; then
     echo "Deleting $iface..."
@@ -160,22 +134,22 @@ for iface in "$VPN_INTERFACE" vpn0 tun0 ppp0; do
 done
 
 echo "VPN down."
-EOF
+FOOTER
 }
 
-# render_sudoers USER - print the /etc/sudoers.d/vpn-client line for USER.
-#
-# HARDCODED CLIENT LIST (3 of 3) - see docs/adding-a-protocol.md.
-# Every VPN client binary that connect-vpn / disconnect-vpn invoke under sudo
-# has to be listed here, or the helpers stall on a password prompt. A new
-# protocol adds its client (and any wrapper it needs, the way fortissl needs
-# screen) to this line.
+# render_sudoers USER - print the /etc/sudoers.d/vpn-client line for USER: the
+# plugin's proto_sudo_commands plus what connect-vpn / disconnect-vpn themselves
+# run under sudo (ip, pkill, kill).
 #
 # Deliberately NOT granted: tail. The only sudo tail calls are error-path log
 # dumps guarded with '|| true', so they degrade to no output instead of
 # failing, and granting it would hand this user root-read on every file.
 render_sudoers() {
-  printf '%s ALL=(root) NOPASSWD: /usr/sbin/openconnect, /usr/local/sbin/openconnect, /usr/sbin/openvpn, /usr/bin/openfortivpn, /usr/bin/screen, /usr/sbin/ip, /usr/bin/ip, /usr/bin/pkill, /usr/bin/kill\n' "$1"
+  local cmds
+  # Word splitting is the point: one path per line for paste.
+  # shellcheck disable=SC2046
+  cmds="$(printf '%s\n' $(proto_sudo_commands) /usr/sbin/ip /usr/bin/ip /usr/bin/pkill /usr/bin/kill | paste -sd, - | sed 's/,/, /g')"
+  printf '%s ALL=(root) NOPASSWD: %s\n' "$1" "$cmds"
 }
 
 # install_helpers NAME - render connect-vpn and disconnect-vpn and push them.

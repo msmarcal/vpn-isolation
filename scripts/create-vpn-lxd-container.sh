@@ -269,6 +269,15 @@ fi
 ROUTES="${ROUTES//[[:space:]]/}"
 validate_routes "$ROUTES"
 
+for fn in proto_validate_args proto_needs_build_openconnect proto_apt_packages \
+          proto_write_env_extra proto_connect_snippet proto_version_cmd \
+          proto_client_processes proto_sudo_commands; do
+  if ! declare -f "$fn" >/dev/null 2>&1; then
+    echo "ERROR: ${PROTOCOL_LIB} does not define ${fn} (see docs/adding-a-protocol.md)." >&2
+    exit 1
+  fi
+done
+
 proto_validate_args
 
 BUILD_OPENCONNECT_DEFAULT="$(proto_needs_build_openconnect)"

@@ -8,8 +8,9 @@ immediately available as `--protocol <name>`.
 ## Contract
 
 Create `scripts/lib/protocol-<name>.sh`. It must set two variables and define
-six functions, plus two optional hooks the orchestrator probes for with
-`declare -f` and skips when absent:
+eight functions, plus three optional hooks the orchestrator probes for with
+`declare -f` and skips when absent. The orchestrator checks the required ones
+at startup and refuses to run if any is missing:
 
 ```bash
 # Must match the filename suffix - the orchestrator dispatches on the filename
@@ -33,6 +34,17 @@ proto_needs_build_openconnect() { echo 0; }
 # the container for this protocol, on top of the always-installed base set
 # (iproute2, iptables, curl, openssh-*, dnsutils, vim).
 proto_apt_packages() { echo "some-client-package"; }
+
+# Print (stdout) the process name(s) of the client, as `pgrep -x` sees them.
+# connect-vpn refuses to start while one is running, and the default
+# disconnect-vpn stops each one (SIGTERM, wait, SIGKILL).
+proto_client_processes() { echo "some-client"; }
+
+# Print (stdout) the absolute paths a non-root --user container may run under
+# sudo for this protocol: the client binary (every path it may be installed
+# at) plus any wrapper the snippets invoke with sudo. ip, pkill and kill are
+# always granted. A missing path makes connect-vpn hang on a sudo prompt.
+proto_sudo_commands() { echo "/usr/sbin/some-client"; }
 
 # Print (stdout) extra KEY=VALUE lines to append to the container's
 # /etc/vpn-client.env. Has access to orchestrator globals (GATEWAY, OVPN,
@@ -89,6 +101,21 @@ proto_post_install() {
 # because PPP interfaces are always named pppN and cannot be renamed inside
 # an LXD container).
 proto_write_env_interface() { echo "ppp0"; }
+
+# OPTIONAL: print (stdout) a bash function named exactly `proto_disconnect`,
+# spliced into the in-container disconnect-vpn in place of the default one.
+# Define it only when stopping the processes from proto_client_processes is
+# not enough. Like proto_connect_snippet it runs inside the container and may
+# use the helpers from common.sh; `stop_client NAME [TIMEOUT]` does the
+# SIGTERM / wait / SIGKILL dance and returns 1 if the kill was needed.
+# protocol-fortissl.sh uses this to also close the screen session it runs in.
+proto_disconnect_snippet() { cat <<'EOF'
+proto_disconnect() {
+  stop_client some-client 10 || true
+  # ... extra teardown ...
+}
+EOF
+}
 ```
 
 ## Reference implementations
@@ -123,55 +150,32 @@ orchestrator exits before touching `lxc`, so this is safe to run anywhere:
 ./scripts/create-vpn-lxd-container.sh --name t --protocol <name>
 ```
 
-## The one place a new client binary DOES need orchestrator changes
+## Where the client binaries end up
 
-Connecting is fully pluggable; **disconnecting is not**. Two spots in
-`scripts/create-vpn-lxd-container.sh` hardcode the set of known client
-binaries, and a protocol introducing a new one has to add itself to both:
+Nothing in the orchestrator names a client. `proto_client_processes` feeds
+the "already connected" guard in `connect-vpn` and the default teardown in
+`disconnect-vpn`; `proto_sudo_commands` feeds the sudoers allowlist for a
+non-root `--user`. Get either wrong and the symptom is specific: a missing
+process name means `disconnect-vpn` reports "VPN down." with the tunnel still
+up, and a missing sudo path means `connect-vpn` hangs on a password prompt.
 
-1. The "already connected" guard in the generated `connect-vpn` runner -
-   currently `pgrep -x openconnect || pgrep -x openvpn || pgrep -x
-   openfortivpn`. A client missing from this list lets a second `connect-vpn`
-   start on top of a live tunnel.
-2. The generated `disconnect-vpn` - it stops each known client by name and
-   then deletes any leftover `vpn0`/`tun0`/`ppp0` link. A client missing here
-   is simply never stopped, and `disconnect-vpn` will report "VPN down."
-   while the tunnel is still up.
+The interface sweep at the end of `disconnect-vpn` deletes `$VPN_INTERFACE`,
+`vpn0`, `tun0` and `ppp0`. A client that names its tunnel something else should
+set it through `proto_write_env_interface`.
 
-Add your client to both lists, and to the interface loop if your tunnel
-device is named something other than `vpn0`/`tun0`/`ppp0`. If your client
-needs a non-obvious teardown, put it next to the existing per-client blocks.
-fortissl is the example: it SIGTERMs `openfortivpn`, waits for it to actually
-exit, and only then closes the `screen` session, because closing the session
-first can leave `/dev/ppp` unusable until the container restarts.
-
-Non-root containers need one more line: the sudoers allowlist written for
-`--user` grants NOPASSWD only for the binaries it knows about, so add yours -
-plus any wrapper you invoke under sudo, the way fortissl needs `screen` - if
-the container is meant to run as anything other than `root`. A binary missing
-from that list makes `connect-vpn` hang on a sudo password prompt.
-
-All three lists live in the render functions in `scripts/lib/orchestrator.sh`
-(`render_connect_vpn`, `render_disconnect_vpn`, `render_sudoers`), and each is
-tagged `HARDCODED CLIENT LIST (N of 3)`:
-
-```bash
-grep -n "HARDCODED CLIENT LIST" scripts/lib/orchestrator.sh
-```
-
-Editing any of them only affects containers created afterwards. Existing
-containers pick the change up with `--refresh-helpers`.
+Changes to a plugin only affect containers created afterwards; existing ones
+pick them up with `--refresh-helpers`.
 
 ## What you should NOT need to touch
 
-- The rest of `scripts/create-vpn-lxd-container.sh` and `scripts/lib/orchestrator.sh`
-  - profile setup, launch, package install, env file, SSH provisioning and the
-  `connect-vpn` assembly are all protocol-agnostic.
+- `scripts/create-vpn-lxd-container.sh` and `scripts/lib/orchestrator.sh` -
+  profile setup, launch, package install, env file, SSH provisioning and the
+  helper assembly are all protocol-agnostic.
 - `scripts/lib/common.sh` (shared helpers - only touch if genuinely shared
   logic is missing, and keep it protocol-agnostic). Note this file is copied
   verbatim into the in-container `connect-vpn`, so it must stay self-contained
   and depend on nothing beyond the base package set.
 
-If you find yourself editing anything beyond the teardown lists above, the
+If you find yourself editing either of those to add a protocol, the
 contract is probably missing something - open an issue/PR describing the gap
 instead of hardcoding a protocol name into the orchestrator.

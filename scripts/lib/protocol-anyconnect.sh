@@ -25,6 +25,13 @@ proto_needs_build_openconnect() { echo 1; }
 # (on top of the always-installed base set).
 proto_apt_packages() { echo "openconnect vpnc-scripts"; }
 
+# Process name(s) connect-vpn refuses to start over and disconnect-vpn stops.
+proto_client_processes() { echo "openconnect"; }
+
+# Absolute paths a non-root --user container may run under sudo for this
+# protocol. Add any wrapper the snippets invoke with sudo as well.
+proto_sudo_commands() { echo "/usr/sbin/openconnect /usr/local/sbin/openconnect"; }
+
 # proto_write_env_extra NAME: extra KEY=VALUE lines appended to
 # /etc/vpn-client.env, one per line on stdout.
 proto_write_env_extra() {

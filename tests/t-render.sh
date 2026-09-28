@@ -41,7 +41,7 @@ for p in "${PROTOCOLS[@]}"; do
   # The bug class this exists for: a generated script that calls a shared helper
   # without carrying its definition fails at runtime, and under
   # `set -euo pipefail` it surfaces as whatever the next `||` branch says.
-  for fn in wait_for_iface apply_split_routes detect_split_routes finish_connect record_connection env_kv stop_client; do
+  for fn in wait_for_iface apply_split_routes detect_split_routes finish_connect record_connection env_kv stop_client tunnel_mode; do
     assert_contains "vpn defines ${fn} ($p)" "$vpn" "${fn}() {"
   done
   assert_contains "vpn defines both actions ($p) - connect"    "$vpn" 'do_connect() {'
@@ -126,8 +126,30 @@ out="$( ( source "${LIB_DIR}/common.sh"; source "${LIB_DIR}/orchestrator.sh"
           source "${LIB_DIR}/protocol-anyconnect.sh"; render_env_file ) )"
 printf '%s\n' "$out" > "${TMPD}/env"
 parses_ok "generated env file parses" "$out"
+assert_contains "env file declares the tunnel mode" "$out" "VPN_TUNNEL_MODE="
 assert_eq "a gateway with a quote survives" "vpn.example.com/it's a group" \
   "$( set +u; source "${TMPD}/env"; printf '%s' "$VPN_GATEWAY" )"
+
+# The declaration is generic, so it must appear for every protocol and not only
+# for the one the env-file check above happens to use.
+for p in "${PROTOCOLS[@]}"; do
+  e="$( ( source "${LIB_DIR}/common.sh"; source "${LIB_DIR}/orchestrator.sh"
+          PROTOCOL="$p" ROUTES='10.1.0.0/16' VPN_IFACE=vpn0 TUNNEL_MODE=split
+          GATEWAY=vpn.example.com OVPN=/dev/null ROUTE_NOPULL='' FORTI_USER=u FORTI_PORT=443
+          source "${LIB_DIR}/protocol-$p.sh"; render_env_file ) )"
+  assert_contains "env file declares the mode ($p)" "$e" 'VPN_TUNNEL_MODE=split'
+done
+
+# The legacy OpenVPN override is written only when asked for: an absent key is
+# what lets the declared mode decide, and writing a default made it always win.
+e="$( ( source "${LIB_DIR}/common.sh"; source "${LIB_DIR}/orchestrator.sh"
+        PROTOCOL=openvpn ROUTES=auto VPN_IFACE=vpn0 TUNNEL_MODE=split OVPN=/dev/null ROUTE_NOPULL=''
+        source "${LIB_DIR}/protocol-openvpn.sh"; render_env_file ) )"
+assert_not_contains "no legacy key when it was not requested" "$e" 'VPN_ROUTE_NOPULL'
+e="$( ( source "${LIB_DIR}/common.sh"; source "${LIB_DIR}/orchestrator.sh"
+        PROTOCOL=openvpn ROUTES=auto VPN_IFACE=vpn0 TUNNEL_MODE=split OVPN=/dev/null ROUTE_NOPULL=1
+        source "${LIB_DIR}/protocol-openvpn.sh"; render_env_file ) )"
+assert_contains "and the legacy key when it was" "$e" 'VPN_ROUTE_NOPULL=1'
 
 # ------------------------------------------------------------------ sudoers
 sud="$( ( source "${LIB_DIR}/protocol-anyconnect.sh"

@@ -242,7 +242,7 @@ Two things follow from that:
 
 Detection waits for the route set to settle rather than reading once, because the tunnel interface exists before the client has finished installing routes - on PPP the gap is wide enough to matter. The cost is that a genuinely route-less gateway pauses for the full settle window before reporting nothing.
 
-An OpenVPN container is the exception today: it is created with `--route-nopull`, which discards every route the server pushes, so there is nothing for `auto` to find. Give it explicit `--routes`.
+OpenVPN used to be the exception: it was created with `--route-nopull`, which discards every route the server pushes, so `auto` had nothing to find - a tunnel with no routes on it, from the default flags alone. It is now configured to accept the server's subnets and refuse only its default route, so `auto` works there like everywhere else.
 
 Edit later:
 
@@ -252,6 +252,20 @@ lxc exec vpn-example-anyconnect -- vim /etc/vpn-client.env
 ```
 
 Hand edits skip that validation, so double-check the format. After `vpn connect`, compare the routes it prints against what you set.
+
+### Declaring a full tunnel
+
+`--tunnel-mode split|full` at creation records what the container is for. `split` is the default and is what the rest of this document assumes. `--no-route-nopull` is still accepted and means `--tunnel-mode full`; asking for both in contradictory directions is refused.
+
+The declaration does two things. For OpenVPN it decides how the client treats the routes a server pushes:
+
+| `VPN_TUNNEL_MODE` | `VPN_ROUTES`     | What the client is told                                     |
+| ----------------- | ---------------- | ------------------------------------------------------------- |
+| `split`           | `auto`           | accept the server's subnets, ignore its default route          |
+| `split`           | explicit CIDRs   | discard everything pushed; only the listed routes are added    |
+| `full`            | either           | accept everything, default route included                      |
+
+For every protocol, including the three whose clients cannot be told any of this, it decides how `vpn connect` reports the default route. A `full` container is told its default route on the tunnel is expected. A `split` container whose client took the default route anyway is told the invariant is broken, in as many words - and the route is left alone, because this reports the invariant rather than enforcing it. Reject a design that silently rewrites it.
 
 ### What a connect records
 
@@ -272,7 +286,8 @@ Because the file is `source`d, it is shell syntax. Plain values (hostnames, path
 | `VPN_INTERFACE` | all | Expected tunnel interface. `vpn0` by default, `ppp0` for fortissl. `vpn connect` overwrites it at runtime with whatever actually appeared. |
 | `VPN_GATEWAY` | anyconnect, gp, fortissl | Portal/gateway host, including any group path for anyconnect. |
 | `VPN_OVPN` | openvpn | Path to the profile inside the container (`/etc/openvpn/client/client.ovpn`). |
-| `VPN_ROUTE_NOPULL` | openvpn | `1` (default) passes `--route-nopull`, ignoring a server-pushed default route. `0` accepts it - full tunnel inside the container. |
+| `VPN_TUNNEL_MODE` | all | `split` (default) or `full`. Declares whether the container's default route should stay on `eth0`. It is intent, not mechanism: OpenVPN derives its client flags from it, and for every protocol it decides how `vpn connect` describes the default route. **Absent in containers created before it existed**, where it is derived - `full` when `VPN_ROUTE_NOPULL=0`, `split` otherwise - so nothing has to be edited. |
+| `VPN_ROUTE_NOPULL` | openvpn | `1` passes `--route-nopull`, discarding every route the server pushes. `0` accepts them all. **Written only when asked for**, and it overrides `VPN_TUNNEL_MODE` when present, so a container that has it keeps behaving exactly as it did. No flag sets it any more; add it by hand for the rare case where you want the client to ignore the server's routes entirely. |
 | `VPN_FORTI_USER` | fortissl | Username passed to `openfortivpn`. Falls back to `$USER` if empty. |
 | `VPN_FORTI_PORT` | fortissl | Gateway port, defaults to `443`. |
 | `VPN_FORTI_OTP_REQUIRED` | fortissl | Any non-empty value makes `vpn connect` prompt for an OTP/2FA token. Empty = no prompt. |
@@ -300,7 +315,7 @@ Passwords and tokens are deliberately absent: they are prompted for on every con
 
 - Prefer a single exported `.ovpn` from the server admin.
 - Store secrets only inside the container (`/etc/openvpn/client/`), mode `600`.
-- If the server pushes `redirect-gateway` and you still want split-tunnel, `vpn connect` adds explicit routes and can ignore the pulled default route via `--route-nopull` when `VPN_ROUTE_NOPULL=1` (default for this framework).
+- A server pushing `redirect-gateway` does not full-tunnel a `split` container: the client is told to ignore that directive, and a pushed route for the whole address space, so the subnets arrive and the default route does not. Both forms are filtered, because a server can express the same intent either way.
 
 ## Do not mix with host VPN clients
 
@@ -378,7 +393,7 @@ Notes:
 | MFA/token login failed before token prompt | account lockout - wait / ask the VPN provider's IT |
 | GlobalProtect stuck on portal | confirm portal vs gateway URL; try `-v` |
 | GlobalProtect: `XML response has no "auth" node` | Portal is SAML-fronted (ADFS/Okta/Azure AD, often with Duo/2FA) - plain openconnect cannot finish that login. Use `connect-vpn-saml` then `connect-vpn-saml-finish` (installed alongside `vpn connect` for `--protocol gp` containers) - see "GlobalProtect with SAML SSO + 2FA (Duo etc)" below |
-| OpenVPN connects but no internal access | subnet missing from `VPN_ROUTES`; or server pushes a different topology |
+| OpenVPN connects but no internal access | subnet missing from `VPN_ROUTES`; or the server pushes a different topology. Containers created before `VPN_TUNNEL_MODE` existed may also carry `VPN_ROUTE_NOPULL=1`, which discards the server's routes and makes `auto` find nothing - give those an explicit `--routes`, or remove that key |
 | SSH timeout to internal host | VPN up? `lxc exec vpn-X -- ip route` |
 | host DNS/routes broken | VPN was started on the host - stop it and delete leftover `vpn0` |
 | fortissl: "requires interactive password entry" | missing `-t`: use `lxc exec -t vpn-X -- vpn connect` |

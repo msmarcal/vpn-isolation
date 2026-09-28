@@ -279,6 +279,10 @@ render_env_file() {
   env_kv VPN_PROTOCOL "$PROTOCOL"
   env_kv VPN_ROUTES "$ROUTES"
   env_kv VPN_INTERFACE "$VPN_IFACE"
+  # Declared for every protocol, not just the ones whose client can act on it:
+  # it also governs how the default route is reported, which is what makes a
+  # gateway-imposed full tunnel a stated outcome instead of an unexplained one.
+  env_kv VPN_TUNNEL_MODE "${TUNNEL_MODE:-split}"
   proto_write_env_extra
 }
 

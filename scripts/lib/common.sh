@@ -181,8 +181,66 @@ finish_connect() {
   else
     echo "Split routes: none"
   fi
-  echo "Default route (must stay off the tunnel):"
+  # Described in terms of what was declared, so the report never asserts a rule
+  # the container was not asked to follow. A container that legitimately wants a
+  # full tunnel should not be told its default route is in the wrong place.
+  local mode default_dev
+  mode="$(tunnel_mode)"
+  default_dev="$(ip route show default 2>/dev/null | awk '{for (i=1;i<NF;i++) if ($i=="dev") {print $(i+1); exit}}')"
+
+  if [[ "$mode" == "full" ]]; then
+    if [[ "$default_dev" == "$iface" ]]; then
+      echo "Default route: on ${iface} - full tunnel, as declared."
+    else
+      echo "Default route: on ${default_dev:-<none>} - a full tunnel was declared,"
+      echo "               but the gateway pushed no default route."
+    fi
+  else
+    if [[ -n "$default_dev" && "$default_dev" == "$iface" ]]; then
+      echo "Default route: on ${iface} - SPLIT TUNNEL DECLARED BUT NOT IN EFFECT." >&2
+      echo "               The client took the default route. Traffic that should" >&2
+      echo "               stay local is going over the VPN." >&2
+      echo "               Left as it is: this reports the invariant, it does not" >&2
+      echo "               enforce it. Set VPN_TUNNEL_MODE=full if that is wanted." >&2
+    else
+      echo "Default route: on ${default_dev:-<none>} - split tunnel intact."
+    fi
+  fi
   ip route show default || true
+}
+
+# tunnel_mode
+# Print the container's declared tunnel mode: "split" or "full".
+#
+# The declaration answers one question - should the default route stay on the
+# container's LAN interface? It is intent, not mechanism: it tells a protocol how
+# to configure its client, and it tells a reader whether what it sees is what was
+# asked for. It is never deduced from what a gateway turned out to push.
+#
+# When VPN_TUNNEL_MODE is absent the mode is DERIVED rather than assumed, because
+# containers created before the key existed still have to report the truth, and a
+# refresh deliberately never rewrites /etc/vpn-client.env.
+#
+# The derivation tests VPN_ROUTE_NOPULL and not the protocol. That key only ever
+# exists in an OpenVPN container, so testing it alone is both sufficient and
+# protocol-agnostic - which matters here, because this file must not grow
+# knowledge of any particular protocol. Set to 0 it means the operator asked for
+# every pushed route to be accepted, default route included, which is a full
+# tunnel. Anything else, including the key being absent, is split.
+tunnel_mode() {
+  local declared="${VPN_TUNNEL_MODE:-}"
+  case "$declared" in
+    split|full) printf '%s\n' "$declared"; return 0 ;;
+    "")         ;;
+    *)          echo "WARNING: VPN_TUNNEL_MODE='${declared}' is not split or full; treating it as split." >&2
+                printf 'split\n'; return 0 ;;
+  esac
+
+  if [[ "${VPN_ROUTE_NOPULL:-}" == "0" ]]; then
+    printf 'full\n'
+  else
+    printf 'split\n'
+  fi
 }
 
 # VPN_STATE_FILE - where a live connection records itself.

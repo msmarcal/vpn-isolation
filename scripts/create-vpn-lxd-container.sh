@@ -74,8 +74,21 @@ REFRESH_HELPERS=0
 # These are consumed indirectly: the sourced protocol lib reads them from
 # proto_validate_args / proto_write_env_extra, so nothing in THIS file
 # references them and shellcheck cannot see the use.
+# TUNNEL_MODE is the generic declaration: should the default route stay on eth0?
+# Empty means the operator did not say, and split is applied after parsing.
+TUNNEL_MODE=""
+TUNNEL_MODE_SOURCE=""      # which flag set it, for the contradiction check
+# ROUTE_NOPULL is openvpn's pre-existing setting, kept as an explicit override
+# that beats the declared mode. Empty means unset, and that is the point: an
+# absent key is what lets the mode decide, and writing a default here would make
+# the override always win and the declaration mean nothing.
+#
+# No flag sets it any more - --no-route-nopull now means --tunnel-mode full. It
+# stays here because the protocol lib reads it, so exporting it still works, and
+# because editing /etc/vpn-client.env is this project's documented way to
+# reconfigure a container after the fact.
 # shellcheck disable=SC2034
-ROUTE_NOPULL=1   # openvpn
+ROUTE_NOPULL=""  # openvpn
 # shellcheck disable=SC2034
 FORTI_USER=""    # fortissl
 # shellcheck disable=SC2034
@@ -114,7 +127,13 @@ Optional:
   --build-openconnect      Build openconnect 9.21 from source (recommended for Cisco/GP)
   --privileged             Run container privileged (if tun/routing fails)
   --profile NAME           LXD profile name (default: vpn-client)
-  --no-route-nopull        For openvpn: allow server-pushed default route
+  --tunnel-mode MODE       split (default) or full. split keeps the container's
+                            default route on eth0 and only the --routes CIDRs go
+                            over the tunnel; full accepts a server-pushed default
+                            route. Declared for every protocol - for clients that
+                            cannot act on it, it still governs how the default
+                            route is reported.
+  --no-route-nopull        Alias for --tunnel-mode full (kept for compatibility)
   --launchpad-id ID        Import SSH keys via 'ssh-import-id lp:ID' (preferred)
   --github-id ID           Import SSH keys via 'ssh-import-id gh:ID' (combinable with --launchpad-id)
   --forti-user USER        For fortissl: FortiGate SSL VPN username (stored in /etc/vpn-client.env)
@@ -132,8 +151,9 @@ file are required, just drop scripts/lib/protocol-<name>.sh.
 EOF
 }
 
-# ROUTE_NOPULL / FORTI_USER / FORTI_PORT are assigned here but read only by the
-# protocol lib sourced further down, which shellcheck cannot follow.
+
+# FORTI_USER / FORTI_PORT are assigned here but read only by the protocol lib
+# sourced further down, which shellcheck cannot follow.
 # shellcheck disable=SC2034
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -147,7 +167,23 @@ while [[ $# -gt 0 ]]; do
     --build-openconnect) BUILD_OPENCONNECT=1; shift ;;
     --privileged) PRIVILEGED=1; shift ;;
     --profile) PROFILE="${2:-}"; shift 2 ;;
-    --no-route-nopull) ROUTE_NOPULL=0; shift ;;
+    --tunnel-mode)
+      case "${2:-}" in
+        split|full) ;;
+        *) echo "ERROR: --tunnel-mode must be 'split' or 'full', got '${2:-}'." >&2; exit 1 ;;
+      esac
+      if [[ -n "$TUNNEL_MODE" && "$TUNNEL_MODE" != "$2" ]]; then
+        echo "ERROR: --tunnel-mode ${2} contradicts ${TUNNEL_MODE_SOURCE}, which asks for ${TUNNEL_MODE}." >&2
+        exit 1
+      fi
+      TUNNEL_MODE="$2"; TUNNEL_MODE_SOURCE="--tunnel-mode ${2}"; shift 2 ;;
+    --no-route-nopull)
+      # Historical spelling of --tunnel-mode full.
+      if [[ -n "$TUNNEL_MODE" && "$TUNNEL_MODE" != "full" ]]; then
+        echo "ERROR: --no-route-nopull means a full tunnel, which contradicts ${TUNNEL_MODE_SOURCE}." >&2
+        exit 1
+      fi
+      TUNNEL_MODE="full"; TUNNEL_MODE_SOURCE="--no-route-nopull"; shift ;;
     --launchpad-id) LAUNCHPAD_ID="${2:-}"; shift 2 ;;
     --github-id) GITHUB_ID="${2:-}"; shift 2 ;;
     --forti-user) FORTI_USER="${2:-}"; shift 2 ;;
@@ -157,6 +193,12 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
+
+# Applied after parsing, not before: an empty TUNNEL_MODE is how the flags tell
+# each other that the operator has not spoken yet, which is what the
+# contradiction check above relies on. Split is the default because keeping the
+# default route off the tunnel is the reason these containers exist.
+TUNNEL_MODE="${TUNNEL_MODE:-split}"
 
 if [[ -z "$NAME" ]]; then
   echo "ERROR: --name is required." >&2

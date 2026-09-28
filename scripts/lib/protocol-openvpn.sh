@@ -38,7 +38,13 @@ proto_sudo_commands() { echo "/usr/sbin/openvpn"; }
 # the host-side --ovpn path is only used by proto_post_install below.
 proto_write_env_extra() {
   env_kv VPN_OVPN /etc/openvpn/client/client.ovpn
-  env_kv VPN_ROUTE_NOPULL "$ROUTE_NOPULL"
+  # Written ONLY when the operator asked for it. An absent key is what lets
+  # VPN_TUNNEL_MODE decide - see the derivation in tunnel_mode. Writing a default
+  # here, as this used to, made the override always present and therefore always
+  # winning, so the declared mode could never take effect.
+  if [[ -n "${ROUTE_NOPULL:-}" ]]; then
+    env_kv VPN_ROUTE_NOPULL "$ROUTE_NOPULL"
+  fi
 }
 
 # proto_post_install: orchestrator-side hook (runs on the host, not inside
@@ -81,11 +87,34 @@ proto_connect() {
   echo "Connecting OpenVPN with $VPN_OVPN"
   echo
   EXTRA=()
-  # --route-nopull discards every route the server pushes, including the
-  # redirect-gateway default route that would otherwise full-tunnel the
-  # container. The split routes are then added explicitly below. This is the
-  # framework default; --no-route-nopull at creation opts out.
-  if [[ "${VPN_ROUTE_NOPULL:-1}" == "1" ]]; then
+  # What to do with the routes the server pushes, derived from the declared
+  # tunnel mode and from whether the route list was named or is to be detected.
+  # The three cases are genuinely different and must not be conflated:
+  #
+  #   split + auto      the server's subnets are wanted, its default route is not
+  #   split + explicit  the operator named what they want; discard the rest
+  #   full              accept everything, default route included
+  #
+  # VPN_ROUTE_NOPULL, when present, is an explicit override and wins: someone who
+  # set it deliberately does not get it silently reinterpreted. It is absent in
+  # containers created without asking for it, which is what lets the mode decide.
+  if [[ -n "${VPN_ROUTE_NOPULL:-}" ]]; then
+    # A nested if rather than `[[ ... ]] && EXTRA+=(...)`: written that way the
+    # branch's last command fails whenever the value is 0, and this script runs
+    # under `set -euo pipefail`. Bash exempts it, but the reader should not have
+    # to know that, and this file has been bitten by that class of thing before.
+    if [[ "$VPN_ROUTE_NOPULL" == "1" ]]; then
+      EXTRA+=(--route-nopull)
+    fi
+  elif [[ "$(tunnel_mode)" == "full" ]]; then
+    : # accept every pushed route, default included
+  elif [[ -z "$VPN_ROUTES" || "$VPN_ROUTES" == "auto" ]]; then
+    # Accept the subnets, refuse the default route. Filtered two ways because a
+    # server can express the same intent either way, and a split tunnel that
+    # depends on which one the far end happens to use is not a promise.
+    EXTRA+=(--pull-filter ignore "redirect-gateway")
+    EXTRA+=(--pull-filter ignore "route 0.0.0.0")
+  else
     EXTRA+=(--route-nopull)
   fi
   # --daemon detaches, so authentication failures surface as a missing tun0

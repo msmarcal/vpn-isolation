@@ -25,7 +25,9 @@ cd vpn-isolation
   --build-openconnect
 ```
 
-**`--routes` accepts multiple networks** as a comma-separated list. Each entry needs an explicit prefix (`/32` for a single host) and must be a network address; the list is validated before anything is created. These become split routes inside the container - only traffic to these subnets goes through the VPN; everything else uses your normal connection. If omitted or set to `auto`, the protocol attempts to detect routes from the server response (currently implemented for AnyConnect; other protocols may fallback to no manual routes). Edit later in `/etc/vpn-client.env` inside the container if needed.
+**`--routes` accepts multiple networks** as a comma-separated list. Each entry needs an explicit prefix (`/32` for a single host) and must be a network address; the list is validated before anything is created. These become split routes inside the container - only traffic to these subnets goes through the VPN; everything else uses your normal connection. If omitted or set to `auto`, the container reads back the routes its client installed on the tunnel and uses those - for every protocol. Edit later in `/etc/vpn-client.env` inside the container if needed.
+
+**`--tunnel-mode split|full`** declares whether the container's default route should stay off the tunnel. `split` is the default and is the reason this tool exists; `full` accepts a server-pushed default route. The declaration also decides how `vpn connect` describes the default route, so a full tunnel is something asked for rather than something noticed afterwards.
 
 Full guide: [`docs/lxd-vpn-client-containers.md`](docs/lxd-vpn-client-containers.md)
 

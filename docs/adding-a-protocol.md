@@ -125,6 +125,19 @@ proto_post_install() {
   # lxc file push ...
 }
 
+# The container's declared tunnel mode is available to your connect snippet as
+# `tunnel_mode`, a helper from common.sh that returns "split" or "full" and
+# derives it for containers created before the declaration existed. If your
+# client can be told what to do with the routes a server pushes, derive that
+# from it rather than inventing a key - protocol-openvpn.sh is the worked
+# example. If your client offers no such control, ignore it: the declaration is
+# still recorded and still governs how the default route is reported, so a
+# gateway-imposed full tunnel is a stated outcome rather than a mystery.
+#
+# Never deduce the mode from what the gateway turned out to push, and never
+# rewrite a default route to enforce it. This framework reports that invariant;
+# enforcing it is deliberately out of scope.
+
 # OPTIONAL: print (stdout) the value written to VPN_INTERFACE in
 # /etc/vpn-client.env. Omit to accept the default `vpn0`. Define it when the
 # kernel - not your client - picks the interface name, so proto_connect has a

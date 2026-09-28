@@ -35,21 +35,23 @@ proto_sudo_commands() { echo "/usr/sbin/openconnect /usr/local/sbin/openconnect"
 # proto_write_env_extra NAME: extra KEY=VALUE lines appended to
 # /etc/vpn-client.env, one per line on stdout.
 proto_write_env_extra() {
-  # env_kv (defined by the orchestrator) shell-quotes the value, so a gateway
+  # env_kv (defined in common.sh) shell-quotes the value, so a gateway
   # path with spaces or shell metacharacters survives `source` intact.
   env_kv VPN_GATEWAY "$GATEWAY"
 }
 
 # proto_connect_snippet: bash function body (as text) injected into the
-# in-container connect-vpn script. Must define shell function proto_connect
-# that uses env vars from /etc/vpn-client.env and prints the resulting
-# interface name in variable VPN_INTERFACE (already exported by caller).
+# in-container connect-vpn script. Defines proto_connect, which authenticates,
+# brings up the tunnel and leaves the interface that actually appeared in
+# VPN_INTERFACE. It does nothing about routing: the generated helper calls
+# finish_connect afterwards, which resolves VPN_ROUTES (including "auto",
+# by reading back what the client installed), applies it, records the
+# connection and reports.
 proto_connect_snippet() {
   cat <<'EOF'
 proto_connect() {
   [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; exit 1; }
   echo "Connecting openconnect protocol=anyconnect to ${VPN_GATEWAY}"
-  echo "Split routes after connect: ${VPN_ROUTES:-<auto-detect>}"
   echo
   # -b backgrounds openconnect once authentication succeeds, so connect-vpn can
   # return while the tunnel stays up. Because it detaches, a failed login shows
@@ -66,27 +68,6 @@ proto_connect() {
     exit 1
   }
   VPN_INTERFACE="$NEW_IFACE"
-
-  # Auto-detect routes from the server if VPN_ROUTES is empty or "auto".
-  # There is no separate query for this: openconnect already ran vpnc-script,
-  # which installed the server split-include routes on the tunnel interface, so
-  # reading the routing table back is what "asking the server" amounts to. Only
-  # works for a split-tunnel gateway - a full-tunnel one pushes a default route,
-  # which is filtered out below, leaving nothing to detect.
-  if [[ -z "$VPN_ROUTES" || "$VPN_ROUTES" == "auto" ]]; then
-    echo "Attempting to auto-detect split-include routes from server..."
-    DETECTED_ROUTES="$(ip route show dev "$VPN_INTERFACE" | awk '{print $1}' | grep -v '^default' | tr '\n' ',' | sed 's/,$//')"
-    if [[ -n "$DETECTED_ROUTES" ]]; then
-      echo "Detected routes from server: $DETECTED_ROUTES"
-      VPN_ROUTES="$DETECTED_ROUTES"
-    else
-      echo "WARNING: No split-include routes detected from server."
-      echo "         You may need to set --routes manually or use full tunnel."
-      VPN_ROUTES=""
-    fi
-  fi
-  
-  apply_split_routes "$VPN_ROUTES" "$VPN_INTERFACE"
 }
 EOF
 }

@@ -47,7 +47,10 @@ helper_work_dir() {
 #   3. the text emitted by this protocol's proto_connect_snippet, which defines
 #      the proto_connect function;
 #   4. a fixed runner that refuses to start on top of a live tunnel, calls
-#      proto_connect, and prints the resulting interface and routes.
+#      proto_connect, then hands the interface that came up to finish_connect,
+#      which resolves the route set, applies it, records the connection and
+#      reports. The runner owns the sequence; common.sh owns the steps, so that
+#      an extra helper a plugin installs reaches the same path.
 #
 # Nothing at runtime reads this repo again.
 render_connect_vpn() {
@@ -68,11 +71,13 @@ HEADER
   echo
   echo "# ---- protocol implementation (scripts/lib/protocol-${PROTOCOL}.sh) ----"
   proto_connect_snippet
-  # Refuse to start on top of a live tunnel. The process names come from the
-  # plugin (proto_client_processes), as do the ones disconnect-vpn stops.
+  # The plugin's client process names, needed twice inside the container: to
+  # refuse starting on top of a live tunnel, and by record_connection to find
+  # the running client's PID.
+  printf '\nVPN_CLIENT_PROCESSES=%s\n' "$(printf '%q' "$(proto_client_processes)")"
   # $p is meant literally here: it expands inside the container.
   # shellcheck disable=SC2016
-  printf '\nfor p in %s; do\n' "$(proto_client_processes)"
+  printf 'for p in $VPN_CLIENT_PROCESSES; do\n'
   cat <<'RUNNER'
   if pgrep -x "$p" >/dev/null 2>&1; then
     echo "A VPN client ($p) is already running. Run disconnect-vpn first." >&2
@@ -80,13 +85,11 @@ HEADER
   fi
 done
 
+# proto_connect authenticates, brings up the tunnel, and leaves the interface
+# that actually appeared in VPN_INTERFACE. It does nothing about routing.
 proto_connect
 
-echo
-echo "VPN up on ${VPN_INTERFACE}."
-ip -br addr show "$VPN_INTERFACE" || true
-echo "Relevant routes:"
-ip route | grep -E "${VPN_INTERFACE}|$(echo "$VPN_ROUTES" | tr "," "|")" || ip route
+finish_connect "$VPN_INTERFACE"
 RUNNER
 }
 
@@ -152,9 +155,24 @@ render_sudoers() {
   printf '%s ALL=(root) NOPASSWD: %s\n' "$1" "$cmds"
 }
 
-# install_helpers NAME - render connect-vpn and disconnect-vpn and push them.
+# render_state_tmpfiles USER - print /etc/tmpfiles.d/vpn-client.conf.
+#
+# connect-vpn records the live connection under /run/vpn-client. /run is tmpfs
+# and root-owned, so a non-root --user container cannot create that directory
+# itself, and the sudoers allowlist deliberately grants no general-purpose
+# write command. systemd-tmpfiles recreates it on every boot instead.
+render_state_tmpfiles() {
+  local user="$1"
+  echo "# Managed by create-vpn-lxd-container.sh"
+  echo "# Runtime directory for connect-vpn's connection record. Transient by"
+  echo "# design: /run is tmpfs, so nothing here survives a container restart."
+  printf 'd /run/vpn-client 0755 %s %s -\n' "$user" "$user"
+}
+
+# install_helpers NAME [USER] - render connect-vpn, disconnect-vpn and the
+# state directory rule, and push them. USER defaults to root.
 install_helpers() {
-  local name="$1" f
+  local name="$1" user="${2:-root}" f
   helper_work_dir
   render_connect_vpn > "${HELPER_WORK_DIR}/connect-vpn"
   render_disconnect_vpn > "${HELPER_WORK_DIR}/disconnect-vpn"
@@ -168,6 +186,31 @@ install_helpers() {
     lxc file push --uid 0 --gid 0 --mode 0755 \
       "${HELPER_WORK_DIR}/${f}" "${name}/usr/local/bin/${f}" >/dev/null
   done
+
+  render_state_tmpfiles "$user" > "${HELPER_WORK_DIR}/vpn-client.conf"
+  lxc file push --uid 0 --gid 0 --mode 0644 \
+    "${HELPER_WORK_DIR}/vpn-client.conf" "${name}/etc/tmpfiles.d/vpn-client.conf" >/dev/null
+}
+
+# install_state_dir NAME USER - create /run/vpn-client now.
+#
+# The tmpfiles rule install_helpers pushes only takes effect at the next boot,
+# so the directory is created here too and a container works before it
+# restarts. Must run AFTER the login user exists, which on the creation path is
+# later than install_helpers - hence a separate function rather than a step
+# inside it.
+#
+# Skipped when the container is stopped: `lxc file push` works on a stopped
+# container, `lxc exec` does not, and /run is tmpfs so the rule covers it at
+# next start anyway.
+install_state_dir() {
+  local name="$1" user="$2"
+  if [[ "$(lxc info "$name" 2>/dev/null | awk '/^Status:/ {print tolower($2)}')" != "running" ]]; then
+    return 0
+  fi
+  if ! lxc exec "$name" -- install -d -m 0755 -o "$user" -g "$user" /run/vpn-client 2>/dev/null; then
+    echo "    NOTE: could not create /run/vpn-client now; it appears on next restart." >&2
+  fi
 }
 
 # install_sudoers NAME USER - render the allowlist for USER and push it.
@@ -197,24 +240,10 @@ install_sudoers() {
 # and copied in with `lxc file push`, which does no expansion.
 # ---------------------------------------------------------------------------
 
-# env_kv KEY VALUE - print one assignment, quoted so that `source` yields VALUE
-# back byte for byte.
-#
-# Values made only of characters that are literal in an assignment (hostnames,
-# paths, CIDR lists, numbers) are written bare, so the file stays easy to edit
-# by hand. Anything else is single-quoted, with embedded single quotes written
-# as '\''. Not `printf %q`: it also escapes commas, turning a,b into a\,b.
-#
-# Protocol plugins call this from proto_write_env_extra, so it is part of the
-# plugin contract - see docs/adding-a-protocol.md.
-env_kv() {
-  local key="$1" value="$2"
-  if [[ "$value" =~ ^[A-Za-z0-9._/:,@%+=-]*$ ]]; then
-    printf '%s=%s\n' "$key" "$value"
-  else
-    printf "%s='%s'\n" "$key" "${value//\'/\'\\\'\'}"
-  fi
-}
+# env_kv is defined in common.sh, not here. It is needed on both sides - the
+# host writes /etc/vpn-client.env with it, and the container writes its
+# connection record with it - and common.sh is the only file that travels.
+# Plugins still call it from proto_write_env_extra exactly as before.
 
 # render_env_file - print /etc/vpn-client.env for the current configuration.
 render_env_file() {

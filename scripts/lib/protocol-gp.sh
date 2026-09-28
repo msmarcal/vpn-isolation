@@ -9,8 +9,9 @@ PROTO_NAME="gp"
 PROTO_DESC="Palo Alto GlobalProtect (openconnect --protocol=gp)"
 
 # This file is a near-copy of protocol-anyconnect.sh - the two differ only in
-# the --protocol flag passed to openconnect and in anyconnect's route
-# auto-detection. protocol-anyconnect.sh carries the fuller commentary on what
+# the --protocol flag passed to openconnect and in the SAML helpers below.
+# Route handling is not in either of them: the generated helper calls
+# finish_connect. protocol-anyconnect.sh carries the fuller commentary on what
 # each contract function is for; docs/adding-a-protocol.md has the contract.
 
 # proto_validate_args: exit 1 with a message if required flags are missing.
@@ -40,7 +41,7 @@ proto_sudo_commands() { echo "/usr/sbin/openconnect /usr/local/sbin/openconnect"
 # Host-side globals are not visible inside the container, so anything the
 # connect snippet needs has to be handed over through /etc/vpn-client.env.
 proto_write_env_extra() {
-  # env_kv (defined by the orchestrator) shell-quotes the value, so a gateway
+  # env_kv (defined in common.sh) shell-quotes the value, so a gateway
   # path with spaces or shell metacharacters survives `source` intact.
   env_kv VPN_GATEWAY "$GATEWAY"
 }
@@ -53,7 +54,6 @@ proto_connect_snippet() {
 proto_connect() {
   [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; exit 1; }
   echo "Connecting openconnect protocol=gp to ${VPN_GATEWAY}"
-  echo "Split routes after connect: ${VPN_ROUTES:-<none>}"
   echo
   # -b backgrounds openconnect once authentication succeeds, so connect-vpn can
   # return while the tunnel stays up. Because it detaches, a failed login shows
@@ -75,7 +75,6 @@ proto_connect() {
     exit 1
   }
   VPN_INTERFACE="$NEW_IFACE"
-  apply_split_routes "$VPN_ROUTES" "$VPN_INTERFACE"
 }
 EOF
 }
@@ -103,8 +102,14 @@ proto_version_cmd() { echo "openconnect --version 2>/dev/null | head -1"; }
 #     similar), and passes them to this script. It feeds those values back
 #     into openconnect via --usergroup=gateway:prelogin-cookie
 #     --passwd-on-stdin, completing the handshake and bringing up the tunnel
-#     the same way plain connect-vpn does (wait_for_iface +
-#     apply_split_routes).
+#     the same way plain connect-vpn does.
+#
+# Both helpers carry scripts/lib/common.sh verbatim, exactly as the generated
+# connect-vpn does. They are separate scripts in a container that has no copy
+# of this repo, so a shared function only exists there because its text was
+# pasted in. Without that, the calls below resolve to nothing: under
+# `set -euo pipefail` the failure surfaces as a misleading "tunnel interface
+# did not appear" while the tunnel is actually up and unrouted.
 #
 # Local script files are written to a temp dir and pushed with `lxc file
 # push`, matching the pattern protocol-openvpn.sh uses for its .ovpn profile -
@@ -158,7 +163,8 @@ echo "     connect-vpn-saml-finish \"<prelogin-cookie value>\" \"<saml-username 
 echo
 HELPER_EOF
 
-  cat > "$tmp/connect-vpn-saml-finish" <<'HELPER_EOF'
+  {
+    cat <<'HELPER_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -177,6 +183,12 @@ if pgrep -x openconnect >/dev/null 2>&1; then
   echo "A VPN client is already running. Run disconnect-vpn first." >&2
   exit 1
 fi
+HELPER_EOF
+    echo "# ---- shared helpers (copied verbatim from scripts/lib/common.sh) ----"
+    cat "${LIB_DIR}/common.sh"
+    echo
+    printf 'VPN_CLIENT_PROCESSES=%s\n' "$(printf '%q' "$(proto_client_processes)")"
+    cat <<'HELPER_EOF'
 
 echo "Completing GlobalProtect SAML auth as ${SAML_USER} (usergroup=${USERGROUP})"
 echo "$COOKIE" | sudo openconnect \
@@ -194,11 +206,13 @@ NEW_IFACE="$(wait_for_iface "$VPN_INTERFACE" tun0)" || {
   exit 1
 }
 VPN_INTERFACE="$NEW_IFACE"
-apply_split_routes "$VPN_ROUTES" "$VPN_INTERFACE"
-echo
-echo "VPN up on ${VPN_INTERFACE}."
-ip -br addr show "$VPN_INTERFACE" || true
+
+# Same route resolution, recording and reporting as connect-vpn. Delegated
+# rather than repeated, so a container behaves identically however its tunnel
+# was authenticated.
+finish_connect "$VPN_INTERFACE"
 HELPER_EOF
+  } > "$tmp/connect-vpn-saml-finish"
 
   chmod +x "$tmp/connect-vpn-saml" "$tmp/connect-vpn-saml-finish"
   lxc file push "$tmp/connect-vpn-saml" "$name/usr/local/bin/connect-vpn-saml" >/dev/null

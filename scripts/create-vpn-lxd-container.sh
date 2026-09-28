@@ -209,7 +209,8 @@ if [[ ! "$PROTOCOL" =~ ^[a-z0-9-]+$ ]]; then
   exit 1
 fi
 
-# --routes is optional; defaults to "auto" for auto-detection if protocol supports it
+# --routes is optional; "auto" reads back what the client installed on the
+# tunnel, and works for every protocol (see finish_connect in lib/common.sh)
 ROUTES="${ROUTES:-auto}"
 
 PROTOCOL_LIB="${LIB_DIR}/protocol-${PROTOCOL}.sh"
@@ -244,8 +245,10 @@ if [[ "$REFRESH_HELPERS" -eq 1 ]]; then
     exit 1
   fi
 
-  install_helpers "$NAME"
+  install_helpers "$NAME" "${SUDO_USER_IN_CONTAINER:-root}"
   echo "    /usr/local/bin/connect-vpn and /usr/local/bin/disconnect-vpn updated"
+  install_state_dir "$NAME" "${SUDO_USER_IN_CONTAINER:-root}"
+  echo "    /etc/tmpfiles.d/vpn-client.conf updated for ${SUDO_USER_IN_CONTAINER:-root}"
 
   if [[ -n "$SUDO_USER_IN_CONTAINER" ]]; then
     install_sudoers "$NAME" "$SUDO_USER_IN_CONTAINER"
@@ -451,7 +454,7 @@ if declare -f proto_post_install >/dev/null 2>&1; then
 fi
 
 echo "==> Installing connect-vpn / disconnect-vpn"
-install_helpers "$NAME"
+install_helpers "$NAME" "$CONTAINER_USER"
 
 echo "==> Passwordless sudo for VPN helpers (${CONTAINER_USER})"
 if [[ "$CONTAINER_USER" != "root" ]]; then
@@ -466,6 +469,11 @@ if [[ "$CONTAINER_USER" != "root" ]]; then
 else
   echo "    (root user - sudo not needed, skipping sudoers setup)"
 fi
+
+# Runtime directory for connect-vpn's connection record. After the block above,
+# because on this path ${CONTAINER_USER} is created there and `install -o` needs
+# it to exist.
+install_state_dir "$NAME" "$CONTAINER_USER"
 
 echo "==> Importing SSH keys for ${CONTAINER_USER}"
 lxc exec "$NAME" -- bash -lc 'command -v ssh-import-id >/dev/null 2>&1 || apt-get install -y -qq ssh-import-id'

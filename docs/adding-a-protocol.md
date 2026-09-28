@@ -50,8 +50,8 @@ proto_sudo_commands() { echo "/usr/sbin/some-client"; }
 # /etc/vpn-client.env. Has access to orchestrator globals (GATEWAY, OVPN,
 # ROUTE_NOPULL, etc).
 #
-# Emit every assignment with `env_kv KEY VALUE`, which the orchestrator
-# defines. connect-vpn `source`s this file, so a value written raw is shell
+# Emit every assignment with `env_kv KEY VALUE`, defined in
+# scripts/lib/common.sh. connect-vpn `source`s this file, so a value written raw is shell
 # code: a space in it runs the rest as a command, an apostrophe breaks the
 # whole file, and `$(...)` executes. env_kv quotes the value only when needed,
 # so plain values still read naturally. Comment lines can be printed with a
@@ -65,9 +65,18 @@ proto_write_env_extra() {
 # be valid standalone bash relying only on:
 #   - variables sourced from /etc/vpn-client.env (VPN_PROTOCOL, VPN_ROUTES,
 #     VPN_INTERFACE, plus anything you added via proto_write_env_extra)
-#   - helpers from scripts/lib/common.sh: apply_split_routes, wait_for_iface
-# On success it should update $VPN_INTERFACE to the real tunnel interface
-# name and call apply_split_routes "$VPN_ROUTES" "$VPN_INTERFACE".
+#   - helpers from scripts/lib/common.sh, which travels into the container
+#     verbatim: wait_for_iface, and the ones the framework calls for you
+#
+# proto_connect authenticates, brings up the tunnel, and leaves the interface
+# that actually appeared in $VPN_INTERFACE. That is where it stops.
+#
+# It must NOT interpret VPN_ROUTES, must NOT detect routes, and must NOT call
+# apply_split_routes. The generated helper calls finish_connect right after
+# this function returns, and that resolves the route set (including "auto",
+# by reading back what the client installed), applies it, records the live
+# connection and prints the report. Routing is identical for every protocol
+# because there is exactly one implementation of it.
 proto_connect_snippet() { cat <<'EOF'
 proto_connect() {
   # ... bring up the tunnel ...
@@ -76,7 +85,6 @@ proto_connect() {
     exit 1
   }
   VPN_INTERFACE="$NEW_IFACE"
-  apply_split_routes "$VPN_ROUTES" "$VPN_INTERFACE"
 }
 EOF
 }
@@ -89,6 +97,24 @@ proto_version_cmd() { echo "some-client --version | head -1"; }
 # container) after packages are installed, for any host-side file staging
 # (e.g. protocol-openvpn.sh uses this to `lxc file push` the .ovpn profile
 # and any certs/keys it references). Omit entirely if not needed.
+#
+# It may also install an extra container helper, for a login flow that a
+# single command cannot express - protocol-gp.sh generates one for SAML
+# portals. Two rules apply to such a helper, and skipping either one is how
+# the gp helpers ended up broken and unnoticed:
+#
+#   1. It must carry scripts/lib/common.sh verbatim, the same way the
+#      generated connect-vpn does. The container has no copy of this repo, so
+#      a shared function only exists in a script whose text contains it.
+#      Calling one without that fails at runtime, and under `set -euo
+#      pipefail` it surfaces as whatever the next `||` branch happens to say.
+#   2. Once its tunnel is up it must call `finish_connect "$VPN_INTERFACE"`
+#      rather than resolving or applying routes itself, so that a container
+#      routes identically however it was authenticated.
+#
+# Text written here is not covered by the parse check that install_helpers
+# runs on connect-vpn and disconnect-vpn, so check it yourself - see
+# "Verifying" below.
 proto_post_install() {
   local name="$1"
   # lxc file push ...
@@ -143,6 +169,18 @@ real connect. Parse it explicitly:
 bash -c 'source scripts/lib/protocol-<name>.sh; proto_connect_snippet' | bash -n /dev/stdin
 ```
 
+That checks the snippet alone. After changing `common.sh` or the assembly
+logic, check the whole assembled script, which is what actually runs:
+
+```bash
+LIB_DIR=scripts/lib PROTOCOL=<name>
+bash -c "source $LIB_DIR/common.sh; source $LIB_DIR/orchestrator.sh
+         source $LIB_DIR/protocol-$PROTOCOL.sh; render_connect_vpn" | bash -n /dev/stdin
+```
+
+An extra helper installed by `proto_post_install` gets no parse check from
+`install_helpers`, so parse it the same way before trusting it.
+
 A PROTO_NAME that disagrees with the filename is caught early - the
 orchestrator exits before touching `lxc`, so this is safe to run anywhere:
 
@@ -162,6 +200,12 @@ up, and a missing sudo path means `connect-vpn` hangs on a password prompt.
 The interface sweep at the end of `disconnect-vpn` deletes `$VPN_INTERFACE`,
 `vpn0`, `tun0` and `ppp0`. A client that names its tunnel something else should
 set it through `proto_write_env_interface`.
+
+`proto_client_processes` is used a third way: the generated helper publishes it
+as `VPN_CLIENT_PROCESSES`, and `record_connection` uses it to find the running
+client's PID for the connection record. A name that does not match any running
+process leaves the record without a PID, and a reader then cannot tell a live
+tunnel from leftovers.
 
 Changes to a plugin only affect containers created afterwards; existing ones
 pick them up with `--refresh-helpers`.

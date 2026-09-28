@@ -214,13 +214,27 @@ lxc stop vpn-example-anyconnect
 - Reads the protocol from the container's `/etc/vpn-client.env`, so `--protocol` is not needed. Passing a different one is refused rather than rebuilding the container with another protocol's helpers.
 - Works on a **stopped** container (it uses `lxc file push`, not `lxc exec`), and leaves it stopped.
 - Does not touch `/etc/vpn-client.env`, installed packages, the openconnect build, or SSH keys. Changes that need any of those still mean recreating the container.
+- Also refreshes `/etc/tmpfiles.d/vpn-client.conf`, the rule that creates the runtime directory `connect-vpn` records into. On a running container the directory is created immediately as well; on a stopped one it appears at next start.
 - The generated scripts are checked with `bash -n`, and the sudoers entry with `visudo -c`, before anything is pushed.
 
 ## Split routes
 
 `connect-vpn` keeps the container default route on `eth0` and only adds `--routes` via the VPN interface.
 
-`--routes` is validated on the host before anything is created. Each entry needs an explicit prefix length (`/32` for a single host) and must be a network address, with no host bits set: `10.10.1.0/16` is rejected with a suggestion of `10.10.0.0/16`. Spaces around commas are removed. This check exists because `ip route` refuses such entries and `connect-vpn` tolerates route errors, so a bad entry would otherwise just be a silently missing route and internal hosts that time out.
+`--routes` is validated on the host before anything is created. Each entry needs an explicit prefix length (`/32` for a single host) and must be a network address, with no host bits set: `10.10.1.0/16` is rejected with a suggestion of `10.10.0.0/16`. Spaces around commas are removed. This check exists because `ip route` refuses such entries and route failures do not abort a connect that already succeeded, so a bad entry would otherwise just be a missing route and internal hosts that time out.
+
+### `auto`
+
+`--routes auto` is the default, and it works for every protocol. After the tunnel is up, `connect-vpn` reads back the routes the client installed on the tunnel interface and treats those as the route set. There is no separate query to the gateway: every supported client installs what the server pushed, so reading the routing table is what asking the server amounts to.
+
+Two things follow from that:
+
+- A gateway that pushes nothing leaves you with no routes. `connect-vpn` says so and stays up, since the tunnel itself is fine. Set `--routes` explicitly if internal hosts then time out.
+- A default route the gateway pushed is never part of the detected set. Split tunnel is the point, and the container's default stays on `eth0`.
+
+Detection waits for the route set to settle rather than reading once, because the tunnel interface exists before the client has finished installing routes - on PPP the gap is wide enough to matter. The cost is that a genuinely route-less gateway pauses for the full settle window before reporting nothing.
+
+An OpenVPN container is the exception today: it is created with `--route-nopull`, which discards every route the server pushes, so there is nothing for `auto` to find. Give it explicit `--routes`.
 
 Edit later:
 
@@ -229,7 +243,13 @@ lxc exec vpn-example-anyconnect -- vim /etc/vpn-client.env
 # VPN_ROUTES=10.10.0.0/24,10.20.0.0/24
 ```
 
-Hand edits skip that validation, so double-check the format. After `connect-vpn`, compare the "Relevant routes" it prints against what you set.
+Hand edits skip that validation, so double-check the format. After `connect-vpn`, compare the routes it prints against what you set.
+
+### What a connect records
+
+While a tunnel is up, `connect-vpn` records it in `/run/vpn-client/state`: the interface that actually came up, the effective route set and whether it was configured or detected, the client process and its PID, and when it connected. The file is transient by design - `/run` is tmpfs, so it is gone after a container restart - and a reader should treat it as absent when the recorded PID is no longer alive.
+
+The directory is created by `/etc/tmpfiles.d/vpn-client.conf`, owned by the container login user so that a non-root `--user` container can write the record without any extra sudo privilege.
 
 ## `/etc/vpn-client.env` reference
 
@@ -240,7 +260,7 @@ Because the file is `source`d, it is shell syntax. Plain values (hostnames, path
 | Key | Set for | Meaning |
 |---|---|---|
 | `VPN_PROTOCOL` | all | Which protocol the container was built for. **Do not edit.** `--refresh-helpers` reads it to decide which protocol's `connect-vpn` to generate, but it installs no packages, so pointing it at another protocol produces a container that cannot connect. Recreate the container instead. |
-| `VPN_ROUTES` | all | Comma-separated split routes, no spaces. `auto` asks the protocol to detect server-pushed routes (anyconnect only); empty means no manual routes. |
+| `VPN_ROUTES` | all | Comma-separated split routes, no spaces. `auto` (the default) reads back the routes the client installed on the tunnel, for every protocol; empty behaves the same as `auto`. See "Split routes" above for what `auto` can and cannot find. |
 | `VPN_INTERFACE` | all | Expected tunnel interface. `vpn0` by default, `ppp0` for fortissl. `connect-vpn` overwrites it at runtime with whatever actually appeared. |
 | `VPN_GATEWAY` | anyconnect, gp, fortissl | Portal/gateway host, including any group path for anyconnect. |
 | `VPN_OVPN` | openvpn | Path to the profile inside the container (`/etc/openvpn/client/client.ovpn`). |

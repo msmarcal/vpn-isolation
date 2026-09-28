@@ -27,7 +27,7 @@ proto_client_processes() { echo "openfortivpn"; }
 proto_sudo_commands() { echo "/usr/bin/openfortivpn /usr/bin/screen"; }
 
 proto_write_env_extra() {
-  # env_kv (defined by the orchestrator) shell-quotes each value, so a username
+  # env_kv (defined in common.sh) shell-quotes each value, so a username
   # like o'brien does not break `source` in connect-vpn.
   env_kv VPN_GATEWAY "$GATEWAY"
   env_kv VPN_FORTI_USER "${FORTI_USER:-}"
@@ -123,8 +123,7 @@ proto_connect() {
   fi
   
   VPN_INTERFACE="$NEW_IFACE"
-  apply_split_routes "$VPN_ROUTES" "$VPN_INTERFACE"
-  
+
   echo "FortiSSL VPN connected on ${VPN_INTERFACE}."
   echo "Screen session: sudo screen -r vpn-session"
   echo "Logs: sudo tail -f /var/log/openfortivpn.log"

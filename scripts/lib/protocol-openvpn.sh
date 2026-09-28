@@ -79,7 +79,6 @@ proto_connect_snippet() {
 proto_connect() {
   [[ -f "$VPN_OVPN" ]] || { echo "Missing profile: $VPN_OVPN" >&2; exit 1; }
   echo "Connecting OpenVPN with $VPN_OVPN"
-  echo "Split routes after connect: ${VPN_ROUTES:-<none>}"
   echo
   EXTRA=()
   # --route-nopull discards every route the server pushes, including the
@@ -106,7 +105,6 @@ proto_connect() {
     exit 1
   }
   VPN_INTERFACE="$NEW_IFACE"
-  apply_split_routes "$VPN_ROUTES" "$VPN_INTERFACE"
 }
 EOF
 }

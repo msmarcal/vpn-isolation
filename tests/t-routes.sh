@@ -4,8 +4,11 @@
 # `set -euo pipefail`, which is where an empty pipeline used to abort a connect
 # that had already succeeded.
 # Sources are resolved at runtime from REPO_ROOT, which is what lets the suite
-# run from anywhere; shellcheck cannot follow that and does not need to.
-# shellcheck disable=SC1090,SC1091
+# run from anywhere; shellcheck cannot follow that and does not need to. Setting
+# variables inside a subshell is the technique here, not a mistake: each case runs
+# isolated so the next cannot inherit it. Some asserts match literal text
+# containing $-expressions.
+# shellcheck disable=SC1090,SC1091,SC2016,SC2030,SC2031
 set -uo pipefail
 source "$(dirname "$0")/lib.sh"
 source "${LIB_DIR}/common.sh"
@@ -55,10 +58,46 @@ assert_eq "a missing interface gives an empty string" '' "$(detect_split_routes 
 
 # The regression that matters: an empty result must not be a failure, or a
 # caller under `set -euo pipefail` dies with the tunnel already up.
-if ( set -euo pipefail
-  source "${LIB_DIR}/common.sh"
+assert_survives "empty detection must exit 0 under set -e" '
+  source "'"${LIB_DIR}"'/common.sh"
   detect_split_routes tun0 >/dev/null
-  detect_split_routes no-such-iface >/dev/null ) ; then pass; else fail "empty detection must exit 0 under set -e" "it aborted"; fi
+  detect_split_routes no-such-iface >/dev/null'
+
+# ------------------------------------------------------------ wait_for_iface_up
+# An interface exists before it is usable: pppd creates the link, but IFF_UP is
+# only set when negotiation finishes, and the kernel refuses a route whose device
+# is not up. Waiting for the NAME is not enough - that was a live bug: the three
+# configured routes all failed with "Device for nexthop is not up" while the
+# tunnel itself was fine.
+export VPN_IFACE_UP_WINDOW=2 VPN_IFACE_UP_INTERVAL=0
+
+STUB_IP_UP='lo,eth0,ppp0' assert_status "an interface carrying IFF_UP is accepted" 0 wait_for_iface_up ppp0
+STUB_IP_UP='lo,eth0'      assert_status "one that exists but is not up is refused" 1 wait_for_iface_up ppp0
+STUB_IP_UP=''             assert_status "and so is one that does not exist"        1 wait_for_iface_up ppp0
+
+# A name that only appears as a prefix of another must not match.
+STUB_IP_UP='lo,ppp01' assert_status "matching is exact, not a prefix" 1 wait_for_iface_up ppp0
+
+# It must never abort its caller, whichever way it goes.
+assert_survives "waiting never aborts, up or not" '
+  source "${LIB_DIR}/common.sh"
+  export VPN_IFACE_UP_WINDOW=1 VPN_IFACE_UP_INTERVAL=0
+  STUB_IP_UP=ppp0 wait_for_iface_up ppp0 || true
+  STUB_IP_UP= wait_for_iface_up ppp0 || true'
+
+# And finish_connect must wait rather than routing into a device that is not up.
+export VPN_STATE_FILE="${TMPD}/state-up" VPN_CLIENT_PROCESSES=openconnect
+out="$( ( export STUB_IP_UP='lo,eth0' STUB_IP_DEFAULT_DEV=eth0 VPN_ROUTES=10.1.0.0/16
+          export VPN_IFACE_UP_WINDOW=1 VPN_IFACE_UP_INTERVAL=0
+          source "${LIB_DIR}/common.sh"
+          finish_connect ppp0 ) 2>&1 )"
+assert_contains "finish_connect says when the interface never came up" "$out" 'never came up'
+
+out="$( ( export STUB_IP_UP='lo,eth0,ppp0' STUB_IP_DEFAULT_DEV=eth0 VPN_ROUTES=10.1.0.0/16
+          export VPN_IFACE_UP_WINDOW=1 VPN_IFACE_UP_INTERVAL=0
+          source "${LIB_DIR}/common.sh"
+          finish_connect ppp0 ) 2>&1 )"
+assert_not_contains "and says nothing when it did" "$out" 'never came up'
 
 # ------------------------------------------------------------- apply_split_routes
 : > "$STUB_LOG"
@@ -76,9 +115,9 @@ assert_contains "a failed entry is named on stderr"   "$err" '10.9.0.0/16'
 assert_contains "and the reason is included"          "$err" 'Invalid prefix'
 assert_contains "the entry after it is still applied" "$(stub_log)" 'ip route replace 10.2.0.0/24 dev tun0'
 
-if ( set -euo pipefail
-  source "${LIB_DIR}/common.sh"
-  apply_split_routes '10.9.0.0/16' tun0 >/dev/null 2>&1 ) ; then pass; else fail "a failed route must not abort under set -e" "it aborted"; fi
+assert_survives "a failed route must not abort under set -e" '
+  source "'"${LIB_DIR}"'/common.sh"
+  apply_split_routes "10.9.0.0/16" tun0'
 unset STUB_IP_FAIL_CIDR
 
 assert_eq "an empty route list is a no-op" '' "$(apply_split_routes '' tun0)"
@@ -100,8 +139,8 @@ STUB_PGREP_ALIVE='' record_connection tun0 '10.1.0.0/16' configured
 assert_eq "no running client means an empty PID" '' "$(state_get VPN_STATE_PID)"
 
 # Losing the record must not fail a connect that already succeeded.
-if ( set -euo pipefail
-  source "${LIB_DIR}/common.sh"
-  VPN_STATE_FILE=/proc/nope/state record_connection tun0 '10.1.0.0/16' configured >/dev/null 2>&1 ) ; then pass; else fail "an unwritable record must not abort under set -e" "it aborted"; fi
+assert_survives "an unwritable record must not abort under set -e" '
+  source "'"${LIB_DIR}"'/common.sh"
+  VPN_STATE_FILE=/proc/nope/state record_connection tun0 "10.1.0.0/16" configured'
 
 finish

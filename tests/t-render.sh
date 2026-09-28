@@ -120,6 +120,47 @@ else
        "so exiting 2 above proves nothing about the dispatcher"
 fi
 
+# --------------------------------------------- fortissl's wait for a PPP link
+# This loop aborted the whole connect on its first iteration: `grep` exits 1
+# while no ppp interface exists yet, and under `set -euo pipefail` that status
+# came out through the assignment. The tunnel still came up, because the client
+# runs under detached screen, so the symptom was a working tunnel with no routes
+# applied and nothing recorded - which looks like anything but a dead script.
+#
+# The surrounding proto_connect cannot run here: it requires a terminal for the
+# password prompt. So the loop is lifted out of the real snippet text, wrapped in
+# a function so its `local` is valid, and run on its own.
+forti="$( ( source "${LIB_DIR}/protocol-fortissl.sh"; proto_connect_snippet ) )"
+
+# The loop is lifted out of the real snippet text and wrapped in a function so
+# its `local` is valid, then run on its own. The surrounding proto_connect cannot
+# run here: it needs a terminal for the password prompt.
+POLL="$( { printf 'poll() {\n'
+           printf '%s\n' "$forti" | sed -n '/^  local i$/,/^  done$/p'
+           printf '  printf "%%s" "$NEW_IFACE"\n}\n'; } )"
+POLL_NOGUARD="$(printf '%s\n' "$POLL" | sed 's/ || NEW_IFACE=""//')"
+export POLL POLL_NOGUARD
+
+assert_survives "no ppp link yet must not abort the connect" '
+  export STUB_IP_LINKS=lo,eth0 VPN_PPP_WAIT=2
+  eval "$POLL"
+  poll'
+
+# And prove that is not passing for some other reason: the same loop with the
+# guard stripped out must abort.
+assert_aborts "the guard is what makes that survive" '
+  export STUB_IP_LINKS=lo,eth0 VPN_PPP_WAIT=2
+  eval "$POLL_NOGUARD"
+  poll'
+
+# It must also find the interface once one appears.
+got="$( ( export STUB_IP_LINKS=lo,eth0,ppp0 VPN_PPP_WAIT=2
+          eval "$POLL"
+          poll ) )"
+assert_eq "the poll finds the interface once it appears" 'ppp0' "$got"
+
+assert_contains "the poll tolerates the empty case explicitly" "$forti" '|| NEW_IFACE=""'
+
 # ------------------------------------------------------------------ env file
 out="$( ( source "${LIB_DIR}/common.sh"; source "${LIB_DIR}/orchestrator.sh"
           PROTOCOL=anyconnect ROUTES='10.1.0.0/16' VPN_IFACE=vpn0 GATEWAY="vpn.example.com/it's a group"
@@ -180,10 +221,10 @@ assert_contains "install_helpers pushes the tmpfiles rule" "$log" '/vpn-client.c
 for f in connect-vpn disconnect-vpn; do
   assert_contains "install_helpers deletes ${f}" "$log" "file delete testctr/usr/local/bin/${f}"
 done
-if ( source "${LIB_DIR}/common.sh"; source "${LIB_DIR}/orchestrator.sh"
-     PROTOCOL=anyconnect; source "${LIB_DIR}/protocol-anyconnect.sh"
-     set -euo pipefail; install_helpers testctr vpnuser ) >/dev/null 2>&1; then pass
-else fail "a missing path must not fail the install" "it aborted"; fi
+assert_survives "a missing path must not fail the install" '
+  source "${LIB_DIR}/common.sh"; source "${LIB_DIR}/orchestrator.sh"
+  PROTOCOL=anyconnect; source "${LIB_DIR}/protocol-anyconnect.sh"
+  install_helpers testctr vpnuser'
 
 # ---------------------------------------------- plugin-installed extra helpers
 # protocol-gp.sh generates two more container scripts. install_helpers does not

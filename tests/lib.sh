@@ -62,6 +62,38 @@ assert_status() {
   fi
 }
 
+# assert_survives DESC BODY / assert_aborts DESC BODY
+# Run BODY in a subshell under `set -euo pipefail` and check whether it ran to
+# completion. Almost everything the container does runs under those options, and
+# the bugs this repo keeps hitting are commands that fail there for reasons the
+# author did not expect - a `grep` with no match, a test that comes out false.
+#
+# The subshell is run STANDALONE, with its status read on the next line. It must
+# never be the condition of an `if`, nor part of a `&&` or `||` list: bash
+# suppresses `set -e` inside a subshell in those positions, so an assertion
+# written that way passes whether or not the code aborts. That mistake was in
+# this file's own tests until it was found by a real bug the suite had missed.
+_status_of() {
+  ( set -euo pipefail; eval "$1" ) >/dev/null 2>&1
+  printf '%s' "$?"
+}
+
+assert_survives() {
+  local desc="$1" body="$2" st
+  st="$(_status_of "$body")"
+  if [[ "$st" == "0" ]]; then pass; else
+    fail "$desc" "aborted with status ${st} under set -euo pipefail"
+  fi
+}
+
+assert_aborts() {
+  local desc="$1" body="$2" st
+  st="$(_status_of "$body")"
+  if [[ "$st" != "0" ]]; then pass; else
+    fail "$desc" "ran to completion, so the guard it is checking proves nothing"
+  fi
+}
+
 # parses_ok DESC TEXT - the check that matters for generated container scripts:
 # they are strings on the host, so a syntax error survives shellcheck.
 parses_ok() {
@@ -84,6 +116,13 @@ use_stubs() {
   : > "$STUB_LOG"
   export STUB_LOG STUB_PUSH_DIR
   export PATH="${TESTS_DIR}/stubs:${PATH}"
+
+  # Every wait loop in common.sh is bounded by a window and polls on an interval.
+  # A test must never spend that time: the suite has to stay under a few seconds,
+  # and a test that waits on the wall clock is one nobody will run. Individual
+  # cases override these when the point is what happens at the boundary.
+  export VPN_ROUTE_SETTLE_WINDOW=2 VPN_ROUTE_SETTLE_INTERVAL=0
+  export VPN_IFACE_UP_WINDOW=2 VPN_IFACE_UP_INTERVAL=0
 }
 
 stub_log() { cat "$STUB_LOG" 2>/dev/null || true; }

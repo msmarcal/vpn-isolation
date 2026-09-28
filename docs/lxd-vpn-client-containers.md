@@ -35,6 +35,16 @@ Daily use is SSH + occasional HTTP/HTTPS. No RDP/VNC required.
 - LXD installed (`lxdbr0` present).
 - Do **not** keep host NetworkManager VPN profiles or a native VPN client session active while using these containers.
 - For Cisco/GlobalProtect portals that fail on distro-packaged openconnect (e.g. 404 on auth), build a recent openconnect inside the container (`--build-openconnect`).
+- **For FortiGate SSL VPN only: the host kernel needs the PPP line discipline loaded.** The container gets `/dev/ppp` from the profile, but the discipline `pppd` switches the tty to lives in a separate module the container cannot load itself:
+
+  ```bash
+  sudo modprobe ppp_async
+  grep -q ppp /proc/tty/ldiscs && echo "ppp line discipline present"
+  # persist it across reboots
+  echo ppp_async | sudo tee /etc/modules-load.d/ppp.conf
+  ```
+
+  `ppp_generic` is built into the Ubuntu kernel, so `/dev/ppp` exists and opens whether or not this is done - which is why the symptom points somewhere else entirely. `ppp_async` is a module, and with `dev.tty.ldisc_autoload=0` (the default on Ubuntu) loading a line discipline on demand needs `CAP_SYS_MODULE`, which an unprivileged container does not have. The result is `Couldn't set tty to PPP discipline: Operation not permitted` on every connect, surviving container restarts and recreation, until the module is loaded on the **host**.
 
 ## One-time host setup
 
@@ -143,7 +153,15 @@ lxc profile device set vpn-client ppp mode=0660
 lxc restart <container>   # per container using the profile
 ```
 
-**Known issue - "Couldn't set tty to PPP discipline: Operation not permitted":** if a previous `openfortivpn`/`pppd` process was killed abruptly (crash, `lxc stop` while connected, manual `pkill -9`), the kernel can leave `/dev/ppp` in a state where the *next* connection attempt fails with this error, even though everything looks clean (`pgrep openfortivpn` empty, device permissions correct). `vpn disconnect` sends `SIGTERM` to `openfortivpn` first (clean PPP logout) and waits up to 15 seconds for it to actually exit before touching the screen session, specifically to avoid this. If the client does not exit in time it is force-killed, and `vpn disconnect` prints a warning saying so, since that is the case most likely to leave `/dev/ppp` stuck. If it still happens: `lxc restart <container>` clears the stuck kernel state and the next `vpn connect` works. Always prefer `vpn disconnect` over killing the container/process directly.
+**Known issue - "Couldn't set tty to PPP discipline: Operation not permitted".** Two different causes produce this, and they need opposite responses. Check which one first:
+
+```bash
+grep ppp /proc/tty/ldiscs    # on the HOST, not in the container
+```
+
+No output means the host is missing `ppp_async` - see [Prerequisites on the host](#prerequisites-on-the-host). Restarting or recreating the container will not help, because nothing in the container can load a kernel module. A line reading `ppp 3` means the discipline is there and the cause is the second one below.
+
+If a previous `openfortivpn`/`pppd` process was killed abruptly (crash, `lxc stop` while connected, manual `pkill -9`), the kernel can leave `/dev/ppp` in a state where the *next* connection attempt fails with this error, even though everything looks clean (`pgrep openfortivpn` empty, device permissions correct). `vpn disconnect` sends `SIGTERM` to `openfortivpn` first (clean PPP logout) and waits up to 15 seconds for it to actually exit before touching the screen session, specifically to avoid this. If the client does not exit in time it is force-killed, and `vpn disconnect` prints a warning saying so, since that is the case most likely to leave `/dev/ppp` stuck. If it still happens: `lxc restart <container>` clears the stuck kernel state and the next `vpn connect` works. Always prefer `vpn disconnect` over killing the container/process directly.
 
 Containers created before this fix still carry the old teardown, which closed the screen session after a fixed delay. Update them with `--refresh-helpers` (see [Updating helpers in an existing container](#updating-helpers-in-an-existing-container)).
 
@@ -401,7 +419,8 @@ Notes:
 | `vpn connect` stops at a sudo password prompt | non-root `--user` and a path is missing from the plugin's `proto_sudo_commands`; fix, then `--refresh-helpers` |
 | `vpn disconnect` says "VPN down." but traffic still flows | a process name is missing from the plugin's `proto_client_processes`; fix, then `--refresh-helpers` |
 | a fix from a newer version of this repo has no effect | the container still has the helpers it was created with - `--refresh-helpers` |
-| fortissl: "Couldn't set tty to PPP discipline" on connect | `lxc restart vpn-X`; if the container predates the disconnect fix, also `--refresh-helpers` |
+| fortissl: "Couldn't set tty to PPP discipline" on connect | Check `grep ppp /proc/tty/ldiscs` **on the host**. Empty: `sudo modprobe ppp_async` and persist it, see prerequisites - a container restart cannot fix this. Present: `lxc restart vpn-X` clears a stuck `/dev/ppp`, and if the container predates the disconnect fix, also `--refresh-helpers` |
+| fortissl: tunnel is up but `VPN_ROUTES` are not applied and nothing is in `/run/vpn-client/state` | The PPP wait loop used to abort the whole connect on its first iteration - `grep` exits 1 while no `ppp*` interface exists yet, and under `set -euo pipefail` that killed the script. The client survived because it runs under detached `screen`, so the tunnel came up unrouted and unrecorded. Fixed; run `--refresh-helpers` on containers created before it |
 
 ## Files
 

@@ -28,11 +28,28 @@ case "$1 ${2:-}" in
     fi
     exit 0 ;;
   "link show")
+    if [[ "${3:-}" == "up" ]]; then
+      # Only interfaces carrying IFF_UP, in the shape `ip` prints.
+      IFS=, read -ra u <<< "${STUB_IP_UP:-${STUB_IP_LINKS:-}}"
+      n=1
+      for x in "${u[@]}"; do
+        [[ -n "$x" ]] && { echo "${n}: ${x}: <UP,LOWER_UP>"; n=$((n+1)); }
+      done
+      exit 0
+    fi
     want "${3:-}" "${STUB_IP_LINKS:-}" && exit 0
     echo "Device \"${3:-}\" does not exist." >&2
     exit 1 ;;
   "-br addr"|"-br link")
     echo "${4:-iface}           UNKNOWN        10.99.0.2/32"
+    exit 0 ;;
+  "-o link")
+    # The shape fortissl's poll parses: "N: name: <flags>".
+    IFS=, read -ra l <<< "${STUB_IP_LINKS:-}"
+    n=1
+    for x in "${l[@]}"; do
+      [[ -n "$x" ]] && { echo "${n}: ${x}: <UP>"; n=$((n+1)); }
+    done
     exit 0 ;;
 esac
 exit 0

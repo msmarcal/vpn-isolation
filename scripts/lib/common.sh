@@ -46,6 +46,33 @@ apply_split_routes() {
   return 0
 }
 
+# wait_for_iface_up IFACE
+# An interface can exist before it is usable. `ip` lists a PPP link as soon as
+# pppd creates it, but IFF_UP is only set when negotiation finishes, and the
+# kernel refuses a route whose device is not up ("Device for nexthop is not up").
+# So routing has to wait for the flag, not for the name - waiting for the name is
+# what wait_for_iface and the protocols' own polls do, and it is not enough.
+#
+# Returns 0 once the flag is set, 1 when the window expires. Never aborts: a
+# device that never comes up is reported by the caller, not fatal here.
+wait_for_iface_up() {
+  local iface="$1"
+  local window="${VPN_IFACE_UP_WINDOW:-20}"
+  local interval="${VPN_IFACE_UP_INTERVAL:-1}"
+  local elapsed=0 step
+  while (( elapsed < window )); do
+    # `ip link show up` lists only interfaces carrying IFF_UP.
+    if ip link show up 2>/dev/null | grep -qE "^[0-9]+: ${iface}[:@]"; then
+      return 0
+    fi
+    sleep "$interval"
+    step="${interval%%.*}"
+    (( step < 1 )) && step=1
+    elapsed=$(( elapsed + step ))
+  done
+  return 1
+}
+
 # detect_split_routes IFACE
 # Print the routes the VPN client installed on IFACE as a comma-separated list,
 # excluding any default route. This is what "asking the server" amounts to:
@@ -151,6 +178,13 @@ stop_client() {
 finish_connect() {
   local iface="$1"
   local routes="${VPN_ROUTES:-}" source="configured"
+
+  # The interface may exist without being usable yet; adding a route to it would
+  # fail, and on PPP that is the normal case rather than the exception.
+  if ! wait_for_iface_up "$iface"; then
+    echo "WARNING: ${iface} exists but never came up." >&2
+    echo "         Routes will probably fail to install - see below." >&2
+  fi
 
   if [[ -z "$routes" || "$routes" == "auto" ]]; then
     echo "Detecting routes pushed by the server on ${iface}..."

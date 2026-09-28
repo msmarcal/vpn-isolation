@@ -44,6 +44,7 @@ assert_contains "the generated command defines the reader" "$vpn" 'tunnel_mode()
 # ships rather than a restatement of it.
 : > "${TMPD}/profile.ovpn"
 snippet="$( ( source "${LIB_DIR}/protocol-openvpn.sh"; proto_connect_snippet ) )"
+export snippet
 
 flags() {
   local declared="$1" routes="$2" legacy="$3"
@@ -84,13 +85,12 @@ assert_not_contains "the legacy key accepting overrides too" "$f" '--pull-filter
 # branch that handles the legacy key set to 0 ends on a failing test. Bash exempts
 # that, but the connect must be shown to reach its end rather than assumed to.
 : > "$STUB_LOG"
-if ( set -euo pipefail
+assert_survives "the legacy-key branch must not abort under set -e" '
      export STUB_IP_LINKS=tun0 VPN_ROUTE_NOPULL=0 VPN_TUNNEL_MODE=split
-     export VPN_OVPN="${TMPD}/profile.ovpn" VPN_ROUTES=auto VPN_INTERFACE=tun0
-     source "${LIB_DIR}/common.sh"
+     export VPN_OVPN="'"${TMPD}"'/profile.ovpn" VPN_ROUTES=auto VPN_INTERFACE=tun0
+     source "'"${LIB_DIR}"'/common.sh"
      eval "$snippet"
-     proto_connect ) >/dev/null 2>&1; then pass
-else fail "the legacy-key branch must not abort under set -e" "it exited non-zero"; fi
+     proto_connect'
 assert_contains "and the client still ran" "$(stub_log)" 'CLIENT openvpn'
 
 # An existing container must behave exactly as it does today. These two rows are
@@ -102,7 +102,7 @@ assert_not_contains "existing container, legacy key accepting" "$f" '--pull-filt
 
 # ------------------------------------------------------------------- the report
 report() {
-  ( export STUB_IP_DEFAULT_DEV="$2" VPN_STATE_FILE="${TMPD}/state" \
+  ( export STUB_IP_DEFAULT_DEV="$2" STUB_IP_UP=tun0 VPN_STATE_FILE="${TMPD}/state" \
            VPN_CLIENT_PROCESSES=openconnect VPN_ROUTE_SETTLE_WINDOW=1 \
            VPN_ROUTE_SETTLE_INTERVAL=0 VPN_TUNNEL_MODE="$1" VPN_ROUTES=10.1.0.0/16
     source "${LIB_DIR}/common.sh"
@@ -127,13 +127,12 @@ assert_contains "full declared but not pushed is stated" "$r" 'pushed no default
 # The divergence reports and continues: the tunnel is up, and enforcing the
 # invariant is a separate decision the design rules out.
 : > "$STUB_LOG"
-if ( set -euo pipefail
-     export STUB_IP_DEFAULT_DEV=tun0 VPN_STATE_FILE="${TMPD}/state2" \
-            VPN_CLIENT_PROCESSES=openconnect VPN_ROUTE_SETTLE_WINDOW=1 \
-            VPN_ROUTE_SETTLE_INTERVAL=0 VPN_TUNNEL_MODE=split VPN_ROUTES=10.1.0.0/16
-     source "${LIB_DIR}/common.sh"
-     finish_connect tun0 ) >/dev/null 2>&1; then pass
-else fail "a broken split tunnel must not fail the connect" "it exited non-zero"; fi
+assert_survives "a broken split tunnel must not fail the connect" '
+     export STUB_IP_DEFAULT_DEV=tun0 STUB_IP_UP=tun0 VPN_STATE_FILE="'"${TMPD}"'/state2"
+     export VPN_CLIENT_PROCESSES=openconnect VPN_ROUTE_SETTLE_WINDOW=1
+     export VPN_ROUTE_SETTLE_INTERVAL=0 VPN_TUNNEL_MODE=split VPN_ROUTES=10.1.0.0/16
+     source "'"${LIB_DIR}"'/common.sh"
+     finish_connect tun0'
 assert_not_contains "and must not alter the default route" "$(stub_log)" 'route del default'
 assert_not_contains "nor replace it"                       "$(stub_log)" 'route replace default'
 

@@ -107,10 +107,18 @@ proto_connect() {
   echo "openfortivpn started in screen session, waiting for interface..."
   
   # Wait for any PPP interface to appear (kernel assigns ppp0, ppp1, etc)
+  #
+  # The `|| NEW_IFACE=""` is load-bearing. `grep` exits 1 while no ppp interface
+  # exists yet, which is every iteration until the tunnel comes up; under
+  # `set -euo pipefail` that status propagated through the assignment and killed
+  # the whole connect on the FIRST iteration. The tunnel still came up, because
+  # openfortivpn runs under detached screen and survives - so the visible symptom
+  # was a working tunnel with none of VPN_ROUTES applied and no connection
+  # recorded, which looks like anything but a dead script.
   local i
   NEW_IFACE=""
-  for i in $(seq 1 60); do
-    NEW_IFACE="$(ip -o link show | awk -F': ' '{print $2}' | grep '^ppp' | head -1)"
+  for i in $(seq 1 "${VPN_PPP_WAIT:-60}"); do
+    NEW_IFACE="$(ip -o link show | awk -F': ' '{print $2}' | grep '^ppp' | head -1)" || NEW_IFACE=""
     [[ -n "$NEW_IFACE" ]] && break
     sleep 1
   done

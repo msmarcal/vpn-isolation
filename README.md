@@ -44,7 +44,21 @@ Full guide: [`docs/lxd-vpn-client-containers.md`](docs/lxd-vpn-client-containers
 | Cisco AnyConnect (with optional MFA) | `--protocol anyconnect` |
 | Palo Alto GlobalProtect | `--protocol gp` |
 | OpenVPN | `--protocol openvpn --ovpn <file>` |
-| FortiGate SSL VPN | `--protocol fortissl` |
+| FortiGate SSL VPN | `--protocol fortissl` (needs `ppp_async` loaded on the **host**, see below) |
+
+**FortiGate SSL VPN has one host-side prerequisite.** The container gets `/dev/ppp`
+from the profile, but the PPP line discipline `pppd` needs lives in a module the
+container cannot load itself:
+
+```bash
+sudo modprobe ppp_async
+echo ppp_async | sudo tee /etc/modules-load.d/ppp.conf   # persist across reboots
+```
+
+Without it every connect fails with `Couldn't set tty to PPP discipline:
+Operation not permitted`, and no amount of restarting or recreating the container
+helps. See
+[the full explanation](docs/lxd-vpn-client-containers.md#prerequisites-on-the-host).
 
 New VPNs/protocols: the script is plugin-based - drop a new `scripts/lib/protocol-<name>.sh` implementing the small contract described in [`docs/adding-a-protocol.md`](docs/adding-a-protocol.md). No changes to the orchestrator are needed.
 

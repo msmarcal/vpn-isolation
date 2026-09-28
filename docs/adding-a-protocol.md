@@ -36,14 +36,14 @@ proto_needs_build_openconnect() { echo 0; }
 proto_apt_packages() { echo "some-client-package"; }
 
 # Print (stdout) the process name(s) of the client, as `pgrep -x` sees them.
-# connect-vpn refuses to start while one is running, and the default
-# disconnect-vpn stops each one (SIGTERM, wait, SIGKILL).
+# `vpn connect` refuses to start while one is running, and the default
+# teardown stops each one (SIGTERM, wait, SIGKILL).
 proto_client_processes() { echo "some-client"; }
 
 # Print (stdout) the absolute paths a non-root --user container may run under
 # sudo for this protocol: the client binary (every path it may be installed
 # at) plus any wrapper the snippets invoke with sudo. ip, pkill and kill are
-# always granted. A missing path makes connect-vpn hang on a sudo prompt.
+# always granted. A missing path makes `vpn connect` hang on a sudo prompt.
 proto_sudo_commands() { echo "/usr/sbin/some-client"; }
 
 # Print (stdout) extra KEY=VALUE lines to append to the container's
@@ -51,7 +51,7 @@ proto_sudo_commands() { echo "/usr/sbin/some-client"; }
 # ROUTE_NOPULL, etc).
 #
 # Emit every assignment with `env_kv KEY VALUE`, defined in
-# scripts/lib/common.sh. connect-vpn `source`s this file, so a value written raw is shell
+# scripts/lib/common.sh. The container's `vpn` command `source`s this file, so a value written raw is shell
 # code: a space in it runs the rest as a command, an apostrophe breaks the
 # whole file, and `$(...)` executes. env_kv quotes the value only when needed,
 # so plain values still read naturally. Comment lines can be printed with a
@@ -61,7 +61,7 @@ proto_write_env_extra() {
 }
 
 # Print (stdout) a bash function definition named exactly `proto_connect`.
-# This text is spliced into the in-container connect-vpn script, so it must
+# This text is spliced into the container's `vpn` command, so it must
 # be valid standalone bash relying only on:
 #   - variables sourced from /etc/vpn-client.env (VPN_PROTOCOL, VPN_ROUTES,
 #     VPN_INTERFACE, plus anything you added via proto_write_env_extra)
@@ -98,13 +98,18 @@ proto_version_cmd() { echo "some-client --version | head -1"; }
 # (e.g. protocol-openvpn.sh uses this to `lxc file push` the .ovpn profile
 # and any certs/keys it references). Omit entirely if not needed.
 #
-# It may also install an extra container helper, for a login flow that a
+# It may also install an extra container command, for a login flow that a
 # single command cannot express - protocol-gp.sh generates one for SAML
-# portals. Two rules apply to such a helper, and skipping either one is how
-# the gp helpers ended up broken and unnoticed:
+# portals. Such a command is its own executable, never a subcommand of `vpn`:
+# the subcommands are the framework's verbs, so a plugin cannot change the
+# shape of the surface an operator has learned, and the framework needs no
+# mechanism for plugins to register verbs.
+#
+# Three rules apply, and skipping either of the first two is how the gp helpers
+# ended up broken and unnoticed:
 #
 #   1. It must carry scripts/lib/common.sh verbatim, the same way the
-#      generated connect-vpn does. The container has no copy of this repo, so
+#      generated `vpn` command does. The container has no copy of this repo, so
 #      a shared function only exists in a script whose text contains it.
 #      Calling one without that fails at runtime, and under `set -euo
 #      pipefail` it surfaces as whatever the next `||` branch happens to say.
@@ -113,7 +118,7 @@ proto_version_cmd() { echo "some-client --version | head -1"; }
 #      routes identically however it was authenticated.
 #
 # Text written here is not covered by the parse check that install_helpers
-# runs on connect-vpn and disconnect-vpn, so check it yourself - see
+# runs on the `vpn` command, so check it yourself - see
 # "Verifying" below.
 proto_post_install() {
   local name="$1"
@@ -129,7 +134,7 @@ proto_post_install() {
 proto_write_env_interface() { echo "ppp0"; }
 
 # OPTIONAL: print (stdout) a bash function named exactly `proto_disconnect`,
-# spliced into the in-container disconnect-vpn in place of the default one.
+# spliced into the container's `vpn disconnect` in place of the default teardown.
 # Define it only when stopping the processes from proto_client_processes is
 # not enough. Like proto_connect_snippet it runs inside the container and may
 # use the helpers from common.sh; `stop_client NAME [TIMEOUT]` does the
@@ -191,13 +196,13 @@ orchestrator exits before touching `lxc`, so this is safe to run anywhere:
 ## Where the client binaries end up
 
 Nothing in the orchestrator names a client. `proto_client_processes` feeds
-the "already connected" guard in `connect-vpn` and the default teardown in
-`disconnect-vpn`; `proto_sudo_commands` feeds the sudoers allowlist for a
+the "already connected" guard in `vpn connect` and the default teardown in
+`vpn disconnect`; `proto_sudo_commands` feeds the sudoers allowlist for a
 non-root `--user`. Get either wrong and the symptom is specific: a missing
-process name means `disconnect-vpn` reports "VPN down." with the tunnel still
-up, and a missing sudo path means `connect-vpn` hangs on a password prompt.
+process name means `vpn disconnect` reports "VPN down." with the tunnel still
+up, and a missing sudo path means `vpn connect` hangs on a password prompt.
 
-The interface sweep at the end of `disconnect-vpn` deletes `$VPN_INTERFACE`,
+The interface sweep at the end of `vpn disconnect` deletes `$VPN_INTERFACE`,
 `vpn0`, `tun0` and `ppp0`. A client that names its tunnel something else should
 set it through `proto_write_env_interface`.
 
@@ -217,7 +222,7 @@ pick them up with `--refresh-helpers`.
   helper assembly are all protocol-agnostic.
 - `scripts/lib/common.sh` (shared helpers - only touch if genuinely shared
   logic is missing, and keep it protocol-agnostic). Note this file is copied
-  verbatim into the in-container `connect-vpn`, so it must stay self-contained
+  verbatim into the container's `vpn` command, so it must stay self-contained
   and depend on nothing beyond the base package set.
 
 If you find yourself editing either of those to add a protocol, the

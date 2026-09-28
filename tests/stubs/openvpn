@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Records the call and does nothing. A VPN client must never actually run from
+# the suite: the whole point of this project is that a tunnel does not touch the
+# host, and a test that connected one would be the worst possible bug.
+echo "CLIENT $(basename "$0") $*" >> "${STUB_LOG:-/dev/null}"
+exit 0

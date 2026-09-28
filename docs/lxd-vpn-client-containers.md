@@ -122,9 +122,9 @@ lxc exec vpn-example-openvpn -- bash -lc 'echo "auth-user-pass /etc/openvpn/clie
   --forti-user your-username
 ```
 
-Uses `openfortivpn` (open-source FortiGate SSL VPN client). **Password is prompted interactively** - run `lxc exec -t vpn-example-fortissl -- connect-vpn` (the `-t` flag is important, otherwise the TTY-less prompt will fail).
+Uses `openfortivpn` (open-source FortiGate SSL VPN client). **Password is prompted interactively** - run `lxc exec -t vpn-example-fortissl -- vpn connect` (the `-t` flag is important, otherwise the TTY-less prompt will fail).
 
-**OTP/2FA is opt-in, not auto-detected.** `openfortivpn` runs inside a detached `screen` session (it needs a TTY and cannot daemonize), so it never gets to prompt for anything itself - `connect-vpn` collects the password and token up front and passes them as `--password` / `--otp`. If your gateway requires 2FA, enable the token prompt once, after creation:
+**OTP/2FA is opt-in, not auto-detected.** `openfortivpn` runs inside a detached `screen` session (it needs a TTY and cannot daemonize), so it never gets to prompt for anything itself - `vpn connect` collects the password and token up front and passes them as `--password` / `--otp`. If your gateway requires 2FA, enable the token prompt once, after creation:
 
 ```bash
 lxc exec vpn-example-fortissl -- bash -lc 'echo VPN_FORTI_OTP_REQUIRED=1 >> /etc/vpn-client.env'
@@ -134,7 +134,7 @@ Without it, a 2FA-protected gateway simply fails to bring up the PPP interface; 
 
 No certificate/key files to push (FortiSSL VPN authenticates with username/password only, like the Cisco AnyConnect case). The gateway port defaults to 443; pass `--forti-port 10443` at creation, or edit `VPN_FORTI_PORT` in the container's `/etc/vpn-client.env` afterwards.
 
-**Note:** The LXD profile automatically includes `/dev/ppp` (mode 0660, root-owned) which `openfortivpn` requires to create the PPP tunnel interface. `connect-vpn` always invokes the client through `sudo`, so root reaches the device even in a `--user` container. If you get "Couldn't open the /dev/ppp device" errors, verify the device is present with `lxc exec <container> -- ls -la /dev/ppp`.
+**Note:** The LXD profile automatically includes `/dev/ppp` (mode 0660, root-owned) which `openfortivpn` requires to create the PPP tunnel interface. `vpn connect` always invokes the client through `sudo`, so root reaches the device even in a `--user` container. If you get "Couldn't open the /dev/ppp device" errors, verify the device is present with `lxc exec <container> -- ls -la /dev/ppp`.
 
 A profile created by an older revision of the script used mode 0666, which also let unprivileged processes in the container open `/dev/ppp`. Re-running the create script tightens an existing profile to 0660 automatically; containers already using it pick the new mode up on their next restart. To apply it without creating a container:
 
@@ -143,17 +143,24 @@ lxc profile device set vpn-client ppp mode=0660
 lxc restart <container>   # per container using the profile
 ```
 
-**Known issue - "Couldn't set tty to PPP discipline: Operation not permitted":** if a previous `openfortivpn`/`pppd` process was killed abruptly (crash, `lxc stop` while connected, manual `pkill -9`), the kernel can leave `/dev/ppp` in a state where the *next* connection attempt fails with this error, even though everything looks clean (`pgrep openfortivpn` empty, device permissions correct). `disconnect-vpn` sends `SIGTERM` to `openfortivpn` first (clean PPP logout) and waits up to 15 seconds for it to actually exit before touching the screen session, specifically to avoid this. If the client does not exit in time it is force-killed, and `disconnect-vpn` prints a warning saying so, since that is the case most likely to leave `/dev/ppp` stuck. If it still happens: `lxc restart <container>` clears the stuck kernel state and the next `connect-vpn` works. Always prefer `disconnect-vpn` over killing the container/process directly.
+**Known issue - "Couldn't set tty to PPP discipline: Operation not permitted":** if a previous `openfortivpn`/`pppd` process was killed abruptly (crash, `lxc stop` while connected, manual `pkill -9`), the kernel can leave `/dev/ppp` in a state where the *next* connection attempt fails with this error, even though everything looks clean (`pgrep openfortivpn` empty, device permissions correct). `vpn disconnect` sends `SIGTERM` to `openfortivpn` first (clean PPP logout) and waits up to 15 seconds for it to actually exit before touching the screen session, specifically to avoid this. If the client does not exit in time it is force-killed, and `vpn disconnect` prints a warning saying so, since that is the case most likely to leave `/dev/ppp` stuck. If it still happens: `lxc restart <container>` clears the stuck kernel state and the next `vpn connect` works. Always prefer `vpn disconnect` over killing the container/process directly.
 
-Containers created before this fix still carry the old `disconnect-vpn`, which closed the screen session after a fixed delay. Update them with `--refresh-helpers` (see [Updating helpers in an existing container](#updating-helpers-in-an-existing-container)).
+Containers created before this fix still carry the old teardown, which closed the screen session after a fixed delay. Update them with `--refresh-helpers` (see [Updating helpers in an existing container](#updating-helpers-in-an-existing-container)).
 
 ## Daily workflow
 
 ### Connect
 
+> **Renamed.** A container installs a single `vpn` command with `connect` and
+> `disconnect` subcommands. It replaced `connect-vpn` and `disconnect-vpn`, which
+> are removed - there are no aliases. A container created earlier keeps working on
+> the pair it has until you run `--refresh-helpers`, which installs the new command
+> and removes the old two. See
+> [Updating helpers in an existing container](#updating-helpers-in-an-existing-container).
+
 ```bash
 lxc start vpn-example-anyconnect
-lxc exec vpn-example-anyconnect -- connect-vpn
+lxc exec vpn-example-anyconnect -- vpn connect
 # anyconnect/gp: username, password, MFA/token prompts
 # openvpn: starts openvpn with the packaged profile
 ```
@@ -198,38 +205,39 @@ sshuttle -r vpn-example-anyconnect 10.10.0.0/24 --dns
 ### Disconnect / stop
 
 ```bash
-lxc exec vpn-example-anyconnect -- disconnect-vpn
+lxc exec vpn-example-anyconnect -- vpn disconnect
 lxc stop vpn-example-anyconnect
 ```
 
 ## Updating helpers in an existing container
 
-`connect-vpn`, `disconnect-vpn` and the sudoers allowlist are generated from this repo when a container is created, and nothing inside the container reads the repo again. So after pulling a newer version, existing containers keep running the old helpers until you refresh them:
+The `vpn` command and the sudoers allowlist are generated from this repo when a container is created, and nothing inside the container reads the repo again. So after pulling a newer version, existing containers keep running the command they were built with until you refresh them:
 
 ```bash
 ./scripts/create-vpn-lxd-container.sh --name vpn-example-fortissl --refresh-helpers
 ```
 
-- Regenerates `/usr/local/bin/connect-vpn`, `/usr/local/bin/disconnect-vpn` and, for a container created with a non-root `--user`, `/etc/sudoers.d/vpn-client`, from exactly the same source a new container would get.
+- Regenerates `/usr/local/bin/vpn` and, for a container created with a non-root `--user`, `/etc/sudoers.d/vpn-client`, from exactly the same source a new container would get.
+- Removes `/usr/local/bin/connect-vpn` and `/usr/local/bin/disconnect-vpn`, the per-action commands `vpn` replaced. Without that a refreshed container would hold both, and the old pair would keep working while frozen at whatever version installed it.
 - Reads the protocol from the container's `/etc/vpn-client.env`, so `--protocol` is not needed. Passing a different one is refused rather than rebuilding the container with another protocol's helpers.
 - Works on a **stopped** container (it uses `lxc file push`, not `lxc exec`), and leaves it stopped.
 - Does not touch `/etc/vpn-client.env`, installed packages, the openconnect build, or SSH keys. Changes that need any of those still mean recreating the container.
-- Also refreshes `/etc/tmpfiles.d/vpn-client.conf`, the rule that creates the runtime directory `connect-vpn` records into. On a running container the directory is created immediately as well; on a stopped one it appears at next start.
+- Also refreshes `/etc/tmpfiles.d/vpn-client.conf`, the rule that creates the runtime directory `vpn connect` records into. On a running container the directory is created immediately as well; on a stopped one it appears at next start.
 - The generated scripts are checked with `bash -n`, and the sudoers entry with `visudo -c`, before anything is pushed.
 
 ## Split routes
 
-`connect-vpn` keeps the container default route on `eth0` and only adds `--routes` via the VPN interface.
+`vpn connect` keeps the container default route on `eth0` and only adds `--routes` via the VPN interface.
 
 `--routes` is validated on the host before anything is created. Each entry needs an explicit prefix length (`/32` for a single host) and must be a network address, with no host bits set: `10.10.1.0/16` is rejected with a suggestion of `10.10.0.0/16`. Spaces around commas are removed. This check exists because `ip route` refuses such entries and route failures do not abort a connect that already succeeded, so a bad entry would otherwise just be a missing route and internal hosts that time out.
 
 ### `auto`
 
-`--routes auto` is the default, and it works for every protocol. After the tunnel is up, `connect-vpn` reads back the routes the client installed on the tunnel interface and treats those as the route set. There is no separate query to the gateway: every supported client installs what the server pushed, so reading the routing table is what asking the server amounts to.
+`--routes auto` is the default, and it works for every protocol. After the tunnel is up, `vpn connect` reads back the routes the client installed on the tunnel interface and treats those as the route set. There is no separate query to the gateway: every supported client installs what the server pushed, so reading the routing table is what asking the server amounts to.
 
 Two things follow from that:
 
-- A gateway that pushes nothing leaves you with no routes. `connect-vpn` says so and stays up, since the tunnel itself is fine. Set `--routes` explicitly if internal hosts then time out.
+- A gateway that pushes nothing leaves you with no routes. `vpn connect` says so and stays up, since the tunnel itself is fine. Set `--routes` explicitly if internal hosts then time out.
 - A default route the gateway pushed is never part of the detected set. Split tunnel is the point, and the container's default stays on `eth0`.
 
 Detection waits for the route set to settle rather than reading once, because the tunnel interface exists before the client has finished installing routes - on PPP the gap is wide enough to matter. The cost is that a genuinely route-less gateway pauses for the full settle window before reporting nothing.
@@ -243,31 +251,31 @@ lxc exec vpn-example-anyconnect -- vim /etc/vpn-client.env
 # VPN_ROUTES=10.10.0.0/24,10.20.0.0/24
 ```
 
-Hand edits skip that validation, so double-check the format. After `connect-vpn`, compare the routes it prints against what you set.
+Hand edits skip that validation, so double-check the format. After `vpn connect`, compare the routes it prints against what you set.
 
 ### What a connect records
 
-While a tunnel is up, `connect-vpn` records it in `/run/vpn-client/state`: the interface that actually came up, the effective route set and whether it was configured or detected, the client process and its PID, and when it connected. The file is transient by design - `/run` is tmpfs, so it is gone after a container restart - and a reader should treat it as absent when the recorded PID is no longer alive.
+While a tunnel is up, `vpn connect` records it in `/run/vpn-client/state`: the interface that actually came up, the effective route set and whether it was configured or detected, the client process and its PID, and when it connected. The file is transient by design - `/run` is tmpfs, so it is gone after a container restart - and a reader should treat it as absent when the recorded PID is no longer alive.
 
 The directory is created by `/etc/tmpfiles.d/vpn-client.conf`, owned by the container login user so that a non-root `--user` container can write the record without any extra sudo privilege.
 
 ## `/etc/vpn-client.env` reference
 
-Written once at creation and sourced by `connect-vpn` / `disconnect-vpn` on every run, so editing it is the supported way to change a container's behavior after the fact. No restart needed - the next `connect-vpn` picks up the new values.
+Written once at creation and sourced by `vpn connect` / `vpn disconnect` on every run, so editing it is the supported way to change a container's behavior after the fact. No restart needed - the next `vpn connect` picks up the new values.
 
 Because the file is `source`d, it is shell syntax. Plain values (hostnames, paths, CIDR lists) are written bare; any value with a space, quote, `$` or other shell character is written in single quotes, e.g. `VPN_GATEWAY='vpn.example.com/my group'`. Keep that quoting when editing by hand.
 
 | Key | Set for | Meaning |
 |---|---|---|
-| `VPN_PROTOCOL` | all | Which protocol the container was built for. **Do not edit.** `--refresh-helpers` reads it to decide which protocol's `connect-vpn` to generate, but it installs no packages, so pointing it at another protocol produces a container that cannot connect. Recreate the container instead. |
+| `VPN_PROTOCOL` | all | Which protocol the container was built for. **Do not edit.** `--refresh-helpers` reads it to decide which protocol's `vpn connect` to generate, but it installs no packages, so pointing it at another protocol produces a container that cannot connect. Recreate the container instead. |
 | `VPN_ROUTES` | all | Comma-separated split routes, no spaces. `auto` (the default) reads back the routes the client installed on the tunnel, for every protocol; empty behaves the same as `auto`. See "Split routes" above for what `auto` can and cannot find. |
-| `VPN_INTERFACE` | all | Expected tunnel interface. `vpn0` by default, `ppp0` for fortissl. `connect-vpn` overwrites it at runtime with whatever actually appeared. |
+| `VPN_INTERFACE` | all | Expected tunnel interface. `vpn0` by default, `ppp0` for fortissl. `vpn connect` overwrites it at runtime with whatever actually appeared. |
 | `VPN_GATEWAY` | anyconnect, gp, fortissl | Portal/gateway host, including any group path for anyconnect. |
 | `VPN_OVPN` | openvpn | Path to the profile inside the container (`/etc/openvpn/client/client.ovpn`). |
 | `VPN_ROUTE_NOPULL` | openvpn | `1` (default) passes `--route-nopull`, ignoring a server-pushed default route. `0` accepts it - full tunnel inside the container. |
 | `VPN_FORTI_USER` | fortissl | Username passed to `openfortivpn`. Falls back to `$USER` if empty. |
 | `VPN_FORTI_PORT` | fortissl | Gateway port, defaults to `443`. |
-| `VPN_FORTI_OTP_REQUIRED` | fortissl | Any non-empty value makes `connect-vpn` prompt for an OTP/2FA token. Empty = no prompt. |
+| `VPN_FORTI_OTP_REQUIRED` | fortissl | Any non-empty value makes `vpn connect` prompt for an OTP/2FA token. Empty = no prompt. |
 
 Passwords and tokens are deliberately absent: they are prompted for on every connect and never written to this file.
 
@@ -292,7 +300,7 @@ Passwords and tokens are deliberately absent: they are prompted for on every con
 
 - Prefer a single exported `.ovpn` from the server admin.
 - Store secrets only inside the container (`/etc/openvpn/client/`), mode `600`.
-- If the server pushes `redirect-gateway` and you still want split-tunnel, `connect-vpn` adds explicit routes and can ignore the pulled default route via `--route-nopull` when `VPN_ROUTE_NOPULL=1` (default for this framework).
+- If the server pushes `redirect-gateway` and you still want split-tunnel, `vpn connect` adds explicit routes and can ignore the pulled default route via `--route-nopull` when `VPN_ROUTE_NOPULL=1` (default for this framework).
 
 ## Do not mix with host VPN clients
 
@@ -321,7 +329,7 @@ ADFS/Okta/Azure AD login page, often with Duo push/code as a second factor)
 instead of a native username/password form. `openconnect --protocol=gp`
 cannot complete that login on its own - the server never returns the XML
 `<auth>` form it expects, it returns an HTML/JS login page instead, and
-`connect-vpn` fails immediately with:
+`vpn connect` fails immediately with:
 
 ```
 XML response has no "auth" node
@@ -332,7 +340,7 @@ Duo happens inside that SAML/ADFS exchange, so openconnect never even reaches
 the point of asking for a second factor.
 
 Containers created with `--protocol gp` get two extra helper scripts for this
-case, alongside the normal `connect-vpn`:
+case, alongside the normal `vpn connect`:
 
 ```bash
 # Step 1 - ask openconnect for the SAML login URL
@@ -359,7 +367,7 @@ Notes:
   path - the SAML URL output or your IT team's GlobalProtect docs will tell
   you which one applies.
 - Plain (non-SAML) GlobalProtect portals are unaffected - they keep working
-  with the normal `connect-vpn`.
+  with the normal `vpn connect`.
 
 ## Troubleshooting
 
@@ -369,14 +377,14 @@ Notes:
 | Cisco/ASA auth 404 on `/` | rebuild openconnect (`--build-openconnect`) |
 | MFA/token login failed before token prompt | account lockout - wait / ask the VPN provider's IT |
 | GlobalProtect stuck on portal | confirm portal vs gateway URL; try `-v` |
-| GlobalProtect: `XML response has no "auth" node` | Portal is SAML-fronted (ADFS/Okta/Azure AD, often with Duo/2FA) - plain openconnect cannot finish that login. Use `connect-vpn-saml` then `connect-vpn-saml-finish` (installed alongside `connect-vpn` for `--protocol gp` containers) - see "GlobalProtect with SAML SSO + 2FA (Duo etc)" below |
+| GlobalProtect: `XML response has no "auth" node` | Portal is SAML-fronted (ADFS/Okta/Azure AD, often with Duo/2FA) - plain openconnect cannot finish that login. Use `connect-vpn-saml` then `connect-vpn-saml-finish` (installed alongside `vpn connect` for `--protocol gp` containers) - see "GlobalProtect with SAML SSO + 2FA (Duo etc)" below |
 | OpenVPN connects but no internal access | subnet missing from `VPN_ROUTES`; or server pushes a different topology |
 | SSH timeout to internal host | VPN up? `lxc exec vpn-X -- ip route` |
 | host DNS/routes broken | VPN was started on the host - stop it and delete leftover `vpn0` |
-| fortissl: "requires interactive password entry" | missing `-t`: use `lxc exec -t vpn-X -- connect-vpn` |
+| fortissl: "requires interactive password entry" | missing `-t`: use `lxc exec -t vpn-X -- vpn connect` |
 | fortissl: PPP interface never appears | wrong password, or 2FA gateway without `VPN_FORTI_OTP_REQUIRED` set - check `sudo tail /var/log/openfortivpn.log` |
-| `connect-vpn` stops at a sudo password prompt | non-root `--user` and a path is missing from the plugin's `proto_sudo_commands`; fix, then `--refresh-helpers` |
-| `disconnect-vpn` says "VPN down." but traffic still flows | a process name is missing from the plugin's `proto_client_processes`; fix, then `--refresh-helpers` |
+| `vpn connect` stops at a sudo password prompt | non-root `--user` and a path is missing from the plugin's `proto_sudo_commands`; fix, then `--refresh-helpers` |
+| `vpn disconnect` says "VPN down." but traffic still flows | a process name is missing from the plugin's `proto_client_processes`; fix, then `--refresh-helpers` |
 | a fix from a newer version of this repo has no effect | the container still has the helpers it was created with - `--refresh-helpers` |
 | fortissl: "Couldn't set tty to PPP discipline" on connect | `lxc restart vpn-X`; if the container predates the disconnect fix, also `--refresh-helpers` |
 

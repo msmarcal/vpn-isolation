@@ -25,7 +25,7 @@ proto_needs_build_openconnect() { echo 1; }
 # (on top of the always-installed base set).
 proto_apt_packages() { echo "openconnect vpnc-scripts"; }
 
-# Process name(s) connect-vpn refuses to start over and disconnect-vpn stops.
+# Process name(s) `vpn connect` refuses to start over and `vpn disconnect` stops.
 proto_client_processes() { echo "openconnect"; }
 
 # Absolute paths a non-root --user container may run under sudo for this
@@ -41,7 +41,7 @@ proto_write_env_extra() {
 }
 
 # proto_connect_snippet: bash function body (as text) injected into the
-# in-container connect-vpn script. Defines proto_connect, which authenticates,
+# container's `vpn` command. Defines proto_connect, which authenticates,
 # brings up the tunnel and leaves the interface that actually appeared in
 # VPN_INTERFACE. It does nothing about routing: the generated helper calls
 # finish_connect afterwards, which resolves VPN_ROUTES (including "auto",
@@ -53,7 +53,7 @@ proto_connect() {
   [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; exit 1; }
   echo "Connecting openconnect protocol=anyconnect to ${VPN_GATEWAY}"
   echo
-  # -b backgrounds openconnect once authentication succeeds, so connect-vpn can
+  # -b backgrounds openconnect once authentication succeeds, so the connect can
   # return while the tunnel stays up. Because it detaches, a failed login shows
   # up only as a missing interface below, not as a non-zero exit here.
   sudo openconnect \

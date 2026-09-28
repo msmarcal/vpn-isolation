@@ -4,7 +4,7 @@
 #
 # This file is used two ways: sourced directly by the orchestrator
 # (create-vpn-lxd-container.sh) on the host, and COPIED VERBATIM into the
-# generated /usr/local/bin/connect-vpn inside each container. The container
+# generated /usr/local/bin/vpn inside each container. The container
 # never has a copy of this repository, so these functions only exist there
 # because their text was pasted in.
 #
@@ -61,7 +61,7 @@ apply_split_routes() {
 # ALWAYS exits 0, including when nothing was found. A caller under `set -e`
 # with pipefail would otherwise be killed by the empty case, which is exactly
 # the bug this replaces: `grep -v` exits 1 on no input, and the assignment
-# inherited that status and aborted connect-vpn with the tunnel already up.
+# inherited that status and aborted the connect with the tunnel already up.
 detect_split_routes() {
   local iface="$1"
   local window="${VPN_ROUTE_SETTLE_WINDOW:-20}"
@@ -226,7 +226,7 @@ record_connection() {
   # a half-written record.
   local tmp="${VPN_STATE_FILE}.tmp.$$"
   {
-    echo "# Written by connect-vpn. Transient: one connection, cleared on restart."
+    echo "# Written by 'vpn connect'. Transient: one connection, cleared on restart."
     env_kv VPN_STATE_IFACE "$iface"
     env_kv VPN_STATE_ROUTES "$routes"
     env_kv VPN_STATE_ROUTE_SOURCE "$source"

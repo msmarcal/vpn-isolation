@@ -31,7 +31,7 @@ proto_needs_build_openconnect() { echo 1; }
 # runs to configure the tunnel interface and the server-pushed routes.
 proto_apt_packages() { echo "openconnect vpnc-scripts"; }
 
-# Process name(s) connect-vpn refuses to start over and disconnect-vpn stops.
+# Process name(s) `vpn connect` refuses to start over and `vpn disconnect` stops.
 proto_client_processes() { echo "openconnect"; }
 
 # Absolute paths a non-root --user container may run under sudo for this
@@ -47,7 +47,7 @@ proto_write_env_extra() {
 }
 
 # proto_connect_snippet: emits the proto_connect function as TEXT, spliced into
-# the generated /usr/local/bin/connect-vpn. The quoted heredoc matters - these
+# the generated /usr/local/bin/vpn. The quoted heredoc matters - these
 # variables must expand inside the container, not here.
 proto_connect_snippet() {
   cat <<'EOF'
@@ -55,7 +55,7 @@ proto_connect() {
   [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; exit 1; }
   echo "Connecting openconnect protocol=gp to ${VPN_GATEWAY}"
   echo
-  # -b backgrounds openconnect once authentication succeeds, so connect-vpn can
+  # -b backgrounds openconnect once authentication succeeds, so the connect can
   # return while the tunnel stays up. Because it detaches, a failed login shows
   # up only as a missing interface below, not as a non-zero exit here.
   #
@@ -85,7 +85,7 @@ proto_version_cmd() { echo "openconnect --version 2>/dev/null | head -1"; }
 # container). GlobalProtect portals increasingly front SAML SSO (ADFS, Okta,
 # Azure AD...) instead of native username/password - openconnect alone cannot
 # complete that login (the SAML exchange, including any 2FA/Duo step, has to
-# happen in a real browser), and connect-vpn fails with the tell-tale
+# happen in a real browser), and `vpn connect` fails with the tell-tale
 # 'XML response has no "auth" node'. This pushes two extra helper scripts into
 # the container, implementing the manual two-step flow documented by the
 # openconnect / gp-saml-gui community for GP+SAML portals:
@@ -102,10 +102,10 @@ proto_version_cmd() { echo "openconnect --version 2>/dev/null | head -1"; }
 #     similar), and passes them to this script. It feeds those values back
 #     into openconnect via --usergroup=gateway:prelogin-cookie
 #     --passwd-on-stdin, completing the handshake and bringing up the tunnel
-#     the same way plain connect-vpn does.
+#     the same way `vpn connect` does.
 #
 # Both helpers carry scripts/lib/common.sh verbatim, exactly as the generated
-# connect-vpn does. They are separate scripts in a container that has no copy
+# the `vpn` command does. They are separate scripts in a container that has no copy
 # of this repo, so a shared function only exists there because its text was
 # pasted in. Without that, the calls below resolve to nothing: under
 # `set -euo pipefail` the failure surfaces as a misleading "tunnel interface
@@ -135,7 +135,7 @@ VPN_GATEWAY="${VPN_GATEWAY:?Set VPN_GATEWAY in /etc/vpn-client.env}"
 USERGROUP="${1:-gateway}"
 
 if pgrep -x openconnect >/dev/null 2>&1; then
-  echo "A VPN client is already running. Run disconnect-vpn first." >&2
+  echo "A VPN client is already running. Run 'vpn disconnect' first." >&2
   exit 1
 fi
 
@@ -180,7 +180,7 @@ SAML_USER="${2:?Usage: connect-vpn-saml-finish <prelogin-cookie> <saml-username>
 USERGROUP="${3:-gateway:prelogin-cookie}"
 
 if pgrep -x openconnect >/dev/null 2>&1; then
-  echo "A VPN client is already running. Run disconnect-vpn first." >&2
+  echo "A VPN client is already running. Run 'vpn disconnect' first." >&2
   exit 1
 fi
 HELPER_EOF
@@ -207,14 +207,14 @@ NEW_IFACE="$(wait_for_iface "$VPN_INTERFACE" tun0)" || {
 }
 VPN_INTERFACE="$NEW_IFACE"
 
-# Same route resolution, recording and reporting as connect-vpn. Delegated
+# Same route resolution, recording and reporting as `vpn connect`. Delegated
 # rather than repeated, so a container behaves identically however its tunnel
 # was authenticated.
 finish_connect "$VPN_INTERFACE"
 HELPER_EOF
   } > "$tmp/connect-vpn-saml-finish"
 
-  # Same ownership and mode install_helpers gives connect-vpn: root:root 0755.
+  # Same ownership and mode install_helpers gives the vpn command: root:root 0755.
   # Without --uid/--gid these land owned by the HOST user's numeric uid, which
   # is unmapped inside the container, and group-writable by it.
   #

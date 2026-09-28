@@ -19,7 +19,7 @@ proto_needs_build_openconnect() { echo 0; }
 
 proto_apt_packages() { echo "openfortivpn screen"; }
 
-# Process name(s) connect-vpn refuses to start over and disconnect-vpn stops.
+# Process name(s) `vpn connect` refuses to start over and `vpn disconnect` stops.
 proto_client_processes() { echo "openfortivpn"; }
 
 # Absolute paths a non-root --user container may run under sudo for this
@@ -28,12 +28,12 @@ proto_sudo_commands() { echo "/usr/bin/openfortivpn /usr/bin/screen"; }
 
 proto_write_env_extra() {
   # env_kv (defined in common.sh) shell-quotes each value, so a username
-  # like o'brien does not break `source` in connect-vpn.
+  # like o'brien does not break `source` in the container's `vpn` command.
   env_kv VPN_GATEWAY "$GATEWAY"
   env_kv VPN_FORTI_USER "${FORTI_USER:-}"
   env_kv VPN_FORTI_PORT "${FORTI_PORT:-443}"
   cat <<'EOF'
-# Set to any non-empty value if the gateway requires OTP/2FA. connect-vpn then
+# Set to any non-empty value if the gateway requires OTP/2FA. `vpn connect` then
 # prompts for the token and passes it to openfortivpn as --otp. Left empty on
 # creation because there is no way to probe the gateway for this beforehand.
 EOF
@@ -46,16 +46,16 @@ EOF
 proto_write_env_interface() { echo "ppp0"; }
 
 # openfortivpn notes:
-# - Credentials are collected by connect-vpn itself (read -s), never stored in
+# - Credentials are collected by `vpn connect` itself (read -s), never stored in
 #   /etc/vpn-client.env or on disk - they only ever live in the process
 #   environment for the lifetime of the connection.
 # - Does not daemonize natively and needs a TTY, so it runs inside a detached
-#   `screen` session. That is what keeps the tunnel up after connect-vpn exits;
+#   `screen` session. That is what keeps the tunnel up after the connect exits;
 #   it also means openfortivpn can no longer prompt for anything itself, which
 #   is why the password and OTP are prompted up front and handed over as
 #   --password / --otp arguments.
 # - OTP/2FA is therefore NOT auto-detected: set VPN_FORTI_OTP_REQUIRED in
-#   /etc/vpn-client.env to make connect-vpn prompt for a token. Without it, a
+#   /etc/vpn-client.env to make `vpn connect` prompt for a token. Without it, a
 #   gateway that demands 2FA just fails to bring up the interface.
 # - Do NOT use --ifname: in LXD containers it fails with ENODEV (error 19)
 #   when trying to rename the PPP interface. The kernel always names PPP
@@ -68,7 +68,7 @@ proto_connect() {
   # Require TTY - openfortivpn needs interactive password entry
   if [[ ! -t 0 ]]; then
     echo "ERROR: openfortivpn requires interactive password entry (TTY)." >&2
-    echo "       Run with: lxc exec -t <container> -- connect-vpn" >&2
+    echo "       Run with: lxc exec -t <container> -- vpn connect" >&2
     exit 1
   fi
   

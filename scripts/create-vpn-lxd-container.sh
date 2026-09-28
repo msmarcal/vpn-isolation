@@ -119,7 +119,7 @@ Optional:
   --github-id ID           Import SSH keys via 'ssh-import-id gh:ID' (combinable with --launchpad-id)
   --forti-user USER        For fortissl: FortiGate SSL VPN username (stored in /etc/vpn-client.env)
   --forti-port PORT        For fortissl: gateway port (default: 443)
-  --refresh-helpers        Regenerate connect-vpn, disconnect-vpn and (for a
+  --refresh-helpers        Regenerate the container's vpn command and (for a
                             non-root container) the sudoers allowlist inside an
                             EXISTING container, from the current source. Works
                             on a stopped container. Leaves /etc/vpn-client.env,
@@ -246,7 +246,7 @@ if [[ "$REFRESH_HELPERS" -eq 1 ]]; then
   fi
 
   install_helpers "$NAME" "${SUDO_USER_IN_CONTAINER:-root}"
-  echo "    /usr/local/bin/connect-vpn and /usr/local/bin/disconnect-vpn updated"
+  echo "    /usr/local/bin/vpn updated (replaces connect-vpn / disconnect-vpn)"
   install_state_dir "$NAME" "${SUDO_USER_IN_CONTAINER:-root}"
   echo "    /etc/tmpfiles.d/vpn-client.conf updated for ${SUDO_USER_IN_CONTAINER:-root}"
 
@@ -288,9 +288,9 @@ if [[ "$REFRESH_HELPERS" -eq 1 ]]; then
   cat <<EOF
 
 Done. /etc/vpn-client.env, packages and SSH keys were not touched.
-The new helpers take effect on the next connect-vpn / disconnect-vpn run.
-If a VPN is connected right now, the next disconnect-vpn already uses the new
-teardown.
+The new command takes effect on the next 'vpn connect' / 'vpn disconnect' run.
+If a VPN is connected right now, the next 'vpn disconnect' already uses the new
+teardown. The connect-vpn and disconnect-vpn commands it replaces were removed.
 EOF
   exit 0
 fi
@@ -337,7 +337,7 @@ if ! lxc profile device get "$PROFILE" tun type >/dev/null 2>&1; then
 fi
 
 # PPP device required for FortiSSL VPN (openfortivpn uses pppd). 0660 is
-# enough: connect-vpn always runs openfortivpn through sudo, so pppd opens the
+# enough: 'vpn connect' always runs openfortivpn through sudo, so pppd opens the
 # device as root even in a non-root --user container. Stated explicitly rather
 # than relying on the LXD default.
 if ! lxc profile device get "$PROFILE" ppp type >/dev/null 2>&1; then
@@ -427,7 +427,7 @@ if [[ "$BUILD_OPENCONNECT" -eq 1 ]]; then
     # /usr/sbin/openconnect and that is what ends up being run. Move the
     # packaged binary aside with dpkg-divert (so a later apt upgrade does not
     # silently restore it) and point /usr/sbin at the freshly built one -
-    # otherwise --build-openconnect appears to succeed while connect-vpn keeps
+    # otherwise --build-openconnect appears to succeed while 'vpn connect' keeps
     # using the old version this flag exists to escape.
     if [[ -x /usr/sbin/openconnect && ! -L /usr/sbin/openconnect ]]; then
       dpkg-divert --local --rename --divert /usr/sbin/openconnect.dpkg-old /usr/sbin/openconnect || true
@@ -453,7 +453,7 @@ if declare -f proto_post_install >/dev/null 2>&1; then
   proto_post_install "$NAME"
 fi
 
-echo "==> Installing connect-vpn / disconnect-vpn"
+echo "==> Installing the vpn command"
 install_helpers "$NAME" "$CONTAINER_USER"
 
 echo "==> Passwordless sudo for VPN helpers (${CONTAINER_USER})"
@@ -470,7 +470,8 @@ else
   echo "    (root user - sudo not needed, skipping sudoers setup)"
 fi
 
-# Runtime directory for connect-vpn's connection record. After the block above,
+# Runtime directory for the connection record 'vpn connect' writes. After the
+# block above,
 # because on this path ${CONTAINER_USER} is created there and `install -o` needs
 # it to exist.
 install_state_dir "$NAME" "$CONTAINER_USER"
@@ -534,8 +535,8 @@ TOOL_VER="$(lxc exec "$NAME" -- bash -c "$(proto_version_cmd)" 2>/dev/null || ec
 # With --routes auto the CIDRs are only known after the first connect, so do
 # not print "auto" as if it were a subnet sshuttle could use.
 if [[ "$ROUTES" == "auto" ]]; then
-  ROUTES_SUMMARY="auto (detected at connect time; connect-vpn prints them)"
-  SSHUTTLE_ROUTES="<cidrs printed by connect-vpn>"
+  ROUTES_SUMMARY="auto (detected at connect time; 'vpn connect' prints them)"
+  SSHUTTLE_ROUTES="<cidrs printed by vpn connect>"
 else
   ROUTES_SUMMARY="$ROUTES"
   SSHUTTLE_ROUTES="${ROUTES//,/ }"
@@ -554,8 +555,8 @@ Container ready: ${NAME}
 
 Daily use:
   lxc start ${NAME}
-  lxc exec ${NAME} -- connect-vpn
-  lxc exec ${NAME} -- disconnect-vpn
+  lxc exec ${NAME} -- vpn connect
+  lxc exec ${NAME} -- vpn disconnect
   lxc stop ${NAME}
 
 Suggested SSH snippet (~/.ssh/config.d/):

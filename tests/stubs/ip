@@ -11,6 +11,11 @@ want() { [[ ",${2}," == *",${1},"* ]]; }
 
 case "$1 ${2:-}" in
   "route show")
+    # `route show <cidr> dev <iface>`: report the prefix when it is installed.
+    if [[ "${4:-}" == "dev" && -n "${3:-}" ]]; then
+      want "${3}" "${STUB_IP_ROUTES:-}" && echo "${3} dev ${5} scope link"
+      exit 0
+    fi
     if [[ "${3:-}" == "dev" ]]; then
       IFS=, read -ra r <<< "${STUB_IP_ROUTES:-}"
       for x in "${r[@]}"; do [[ -n "$x" ]] && echo "$x dev ${4} scope link"; done

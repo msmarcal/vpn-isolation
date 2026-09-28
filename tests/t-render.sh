@@ -41,11 +41,12 @@ for p in "${PROTOCOLS[@]}"; do
   # The bug class this exists for: a generated script that calls a shared helper
   # without carrying its definition fails at runtime, and under
   # `set -euo pipefail` it surfaces as whatever the next `||` branch says.
-  for fn in wait_for_iface apply_split_routes detect_split_routes finish_connect record_connection env_kv stop_client tunnel_mode; do
+  for fn in wait_for_iface wait_for_iface_up apply_split_routes detect_split_routes finish_connect record_connection env_kv stop_client tunnel_mode state_get state_client_alive tunnel_state status_iface status_missing_routes default_route_verdict resolv_fingerprint; do
     assert_contains "vpn defines ${fn} ($p)" "$vpn" "${fn}() {"
   done
-  assert_contains "vpn defines both actions ($p) - connect"    "$vpn" 'do_connect() {'
-  assert_contains "vpn defines both actions ($p) - disconnect" "$vpn" 'do_disconnect() {'
+  assert_contains "vpn defines the actions ($p) - connect"    "$vpn" 'do_connect() {'
+  assert_contains "vpn defines the actions ($p) - disconnect" "$vpn" 'do_disconnect() {'
+  assert_contains "vpn defines the actions ($p) - status"     "$vpn" 'do_status() {'
   assert_contains "connect hands off to finish_connect ($p)"   "$vpn" 'finish_connect "$VPN_INTERFACE"'
   assert_contains "vpn publishes the client names ($p)"        "$vpn" 'VPN_CLIENT_PROCESSES='
   assert_contains "vpn defines the teardown ($p)"              "$vpn" 'proto_disconnect() {'

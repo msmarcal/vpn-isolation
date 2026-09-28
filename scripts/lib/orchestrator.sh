@@ -99,6 +99,7 @@ Usage: vpn <subcommand>
 
   connect     authenticate, bring up the tunnel, apply the split routes
   disconnect  stop the client and remove the tunnel interface
+  status      report what the tunnel is doing, and change nothing
 
 This container runs one VPN, so the subcommands do not name it.
 USAGE
@@ -140,11 +141,110 @@ do_disconnect() {
   echo "VPN down."
 }
 
+do_status() {
+  # A read, start to finish. Nothing here applies a route, stops a client,
+  # deletes an interface or touches the record. Asking a container how it is must
+  # never be a way of changing how it is.
+  local iface state verdict dev expected missing client pid uptime addr resolv_now resolv_was
+  iface="$(status_iface)"
+  state="$(tunnel_state "$iface")"
+  verdict="$(default_route_verdict "$iface")"
+  dev="${verdict%% *}"
+
+  # Liveness the same way tunnel_state establishes it, so the facts cannot
+  # contradict the headline: the record only counts when the process it names is
+  # really that process, otherwise fall back to looking for a declared client.
+  client=""; pid=""
+  if state_client_alive; then
+    client="$(state_get VPN_STATE_CLIENT)"
+    pid="$(state_get VPN_STATE_PID)"
+  else
+    local candidate
+    for candidate in ${VPN_CLIENT_PROCESSES:-}; do
+      pid="$(pgrep -x "$candidate" 2>/dev/null | head -1)" || pid=""
+      if [[ -n "$pid" ]]; then client="$candidate"; break; fi
+    done
+    # Nothing running: name what this container's client WOULD be, from the
+    # record if there is one and otherwise from what the plugin declared. Saying
+    # "<none> not running" tells the operator less than nothing.
+    if [[ -z "$client" ]]; then
+      client="$(state_get VPN_STATE_CLIENT)"
+      [[ -n "$client" ]] || client="${VPN_CLIENT_PROCESSES%% *}"
+    fi
+  fi
+
+  printf '%s   %s   %s\n\n' "$(hostname)" "$VPN_PROTOCOL" "$state"
+
+  if [[ -n "$pid" ]]; then
+    # Uptime from the process, not from the record: a recycled pid would make a
+    # dead client look live, so the process is the authority on both.
+    uptime="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')" || uptime=""
+    printf '  client      %s running (pid %s%s)\n' "$client" "$pid" \
+      "${uptime:+, up ${uptime}s}"
+  else
+    printf '  client      %s not running\n' "${client:-<none>}"
+  fi
+
+  if ip link show "$iface" >/dev/null 2>&1; then
+    addr="$(ip -br addr show "$iface" 2>/dev/null | awk '{print $3}')" || addr=""
+    printf '  interface   %s %s\n' "$iface" "${addr:-<no address>}"
+    if [[ -n "${VPN_INTERFACE:-}" && "$iface" != "$VPN_INTERFACE" ]]; then
+      printf '              configured as %s; the client renamed it\n' "$VPN_INTERFACE"
+    fi
+  else
+    printf '  interface   %s absent\n' "$iface"
+  fi
+
+  expected="$(state_get VPN_STATE_ROUTES)"
+  if [[ -z "$expected" ]]; then
+    # Unknown is not the same as none: a connection older than the record has no
+    # expectation, and calling that "complete" or "all missing" would both lie.
+    printf '  routes      expected set unknown (no record for this connection)\n'
+    ip route show dev "$iface" 2>/dev/null | awk '{print "              installed: " $1}' || true
+  else
+    missing="$(status_missing_routes "$iface")"
+    if [[ -z "$missing" ]]; then
+      printf '  routes      all %s present on %s\n' \
+        "$(printf '%s' "$expected" | tr ',' '\n' | grep -c .)" "$iface"
+    else
+      printf '  routes      %s of %s present on %s\n' \
+        "$(( $(printf '%s' "$expected" | tr ',' '\n' | grep -c .) - $(printf '%s' "$missing" | wc -w) ))" \
+        "$(printf '%s' "$expected" | tr ',' '\n' | grep -c .)" "$iface"
+      printf '              missing: %s\n' "$missing"
+    fi
+  fi
+
+  case "${verdict##* }" in
+    ok)         printf '  default     %s - as declared (%s)\n' "$dev" "$(tunnel_mode)" ;;
+    not-pushed) printf '  default     %s - full tunnel declared, none pushed\n' "$dev" ;;
+    broken)     printf '  default     %s - SPLIT TUNNEL NOT IN EFFECT\n' "$dev" ;;
+  esac
+
+  resolv_now="$(resolv_fingerprint)"
+  resolv_was="$(state_get VPN_STATE_RESOLV)"
+  if [[ -z "$resolv_was" ]]; then
+    printf '  resolver    %s - cannot tell whether it changed (no baseline)\n' \
+      "${resolv_now:-<none>}"
+  elif [[ "$resolv_now" == "$resolv_was" ]]; then
+    printf '  resolver    %s - unchanged since connect\n' "${resolv_now:-<none>}"
+  else
+    printf '  resolver    %s - REWRITTEN since connect (was %s)\n' \
+      "${resolv_now:-<none>}" "$resolv_was"
+  fi
+
+  [[ "$state" == "stale" ]] && printf '\n  run '"'"'vpn disconnect'"'"' to clear the leftovers\n'
+  return 0
+}
+
 # Exit 2 for a usage error, so a caller can tell "you asked for something that
 # does not exist" from an action that ran and failed, which exits 1.
+#
+# `status` always reports success when it determined the state, whatever that
+# state is: it is a report for a person, and the state is carried by the text.
 case "${1:-}" in
   connect)    do_connect ;;
   disconnect) do_disconnect ;;
+  status)     do_status ;;
   -h|--help)  usage ;;
   "")         usage >&2; exit 2 ;;
   *)          echo "vpn: unknown subcommand '${1}'" >&2; usage >&2; exit 2 ;;

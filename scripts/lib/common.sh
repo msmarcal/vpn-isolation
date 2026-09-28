@@ -216,30 +216,28 @@ finish_connect() {
     echo "Split routes: none"
   fi
   # Described in terms of what was declared, so the report never asserts a rule
-  # the container was not asked to follow. A container that legitimately wants a
-  # full tunnel should not be told its default route is in the wrong place.
-  local mode default_dev
-  mode="$(tunnel_mode)"
-  default_dev="$(ip route show default 2>/dev/null | awk '{for (i=1;i<NF;i++) if ($i=="dev") {print $(i+1); exit}}')"
-
-  if [[ "$mode" == "full" ]]; then
-    if [[ "$default_dev" == "$iface" ]]; then
-      echo "Default route: on ${iface} - full tunnel, as declared."
-    else
-      echo "Default route: on ${default_dev:-<none>} - a full tunnel was declared,"
-      echo "               but the gateway pushed no default route."
-    fi
-  else
-    if [[ -n "$default_dev" && "$default_dev" == "$iface" ]]; then
-      echo "Default route: on ${iface} - SPLIT TUNNEL DECLARED BUT NOT IN EFFECT." >&2
+  # the container was not asked to follow. The judgment itself is shared with the
+  # status report, so the two cannot drift apart.
+  local verdict default_dev
+  verdict="$(default_route_verdict "$iface")"
+  default_dev="${verdict%% *}"
+  case "${verdict##* }" in
+    ok)
+      if [[ "$default_dev" == "$iface" ]]; then
+        echo "Default route: on ${iface} - full tunnel, as declared."
+      else
+        echo "Default route: on ${default_dev} - split tunnel intact."
+      fi ;;
+    not-pushed)
+      echo "Default route: on ${default_dev} - a full tunnel was declared,"
+      echo "               but the gateway pushed no default route." ;;
+    broken)
+      echo "Default route: on ${default_dev} - SPLIT TUNNEL DECLARED BUT NOT IN EFFECT." >&2
       echo "               The client took the default route. Traffic that should" >&2
       echo "               stay local is going over the VPN." >&2
       echo "               Left as it is: this reports the invariant, it does not" >&2
-      echo "               enforce it. Set VPN_TUNNEL_MODE=full if that is wanted." >&2
-    else
-      echo "Default route: on ${default_dev:-<none>} - split tunnel intact."
-    fi
-  fi
+      echo "               enforce it. Set VPN_TUNNEL_MODE=full if that is wanted." >&2 ;;
+  esac
   ip route show default || true
 }
 
@@ -287,6 +285,176 @@ tunnel_mode() {
 # leftovers.
 VPN_STATE_FILE="${VPN_STATE_FILE:-/run/vpn-client/state}"
 
+# resolv_fingerprint
+# A stable description of the container's resolver configuration: the nameservers
+# it currently lists, comma separated. The list rather than a digest, because a
+# digest says nothing useful to an operator when it differs, and this is shown.
+#
+# Whether the resolver CHANGED is unanswerable at status time on its own - a
+# nameserver list is just a list - so a connect records this and the status
+# compares. No recorded value means "cannot tell", never "unchanged".
+resolv_fingerprint() {
+  local ns
+  ns="$(awk '/^nameserver[[:space:]]/ {print $2}' /etc/resolv.conf 2>/dev/null \
+          | sort | paste -sd, -)" || ns=""
+  printf '%s\n' "$ns"
+}
+
+# status_iface
+# The tunnel interface to report on: what the record says, or failing that the
+# first of the names the supported clients use that actually exists. A connection
+# established before records were written has no record, and the report still has
+# to describe it.
+status_iface() {
+  local iface candidate
+  iface="$(state_get VPN_STATE_IFACE)"
+  if [[ -n "$iface" ]] && ip link show "$iface" >/dev/null 2>&1; then
+    printf '%s\n' "$iface"
+    return 0
+  fi
+  for candidate in "${VPN_INTERFACE:-vpn0}" vpn0 tun0 ppp0; do
+    if ip link show "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s\n' "${iface:-${VPN_INTERFACE:-vpn0}}"
+}
+
+# tunnel_state IFACE
+# Print one of: down, connected, degraded, stale.
+#
+#   down       no client running and no tunnel interface
+#   connected  client running, interface up, routes present, default route where
+#              the declared mode says it belongs
+#   degraded   client running, but a route is missing or the default route is not
+#              where the declared mode says
+#   stale      no client running, but the interface and its routes are still there
+#
+# Liveness comes from checking the client, never from the record existing: a
+# record outlives the client that wrote it. Where the expected route set is
+# unknown - no record - that alone must NOT make the state degraded, or every
+# container predating records would look broken.
+tunnel_state() {
+  local iface="$1" alive=1 present=1 p
+  state_client_alive && alive=0
+  if [[ "$alive" != "0" ]]; then
+    for p in ${VPN_CLIENT_PROCESSES:-}; do
+      pgrep -x "$p" >/dev/null 2>&1 && { alive=0; break; }
+    done
+  fi
+  ip link show "$iface" >/dev/null 2>&1 && present=0
+
+  if [[ "$alive" != "0" ]]; then
+    [[ "$present" == "0" ]] && { printf 'stale\n'; return 0; }
+    printf 'down\n'
+    return 0
+  fi
+
+  [[ "$present" == "0" ]] || { printf 'degraded\n'; return 0; }
+  [[ "$(default_route_verdict "$iface")" == *" broken" ]] && { printf 'degraded\n'; return 0; }
+  [[ -n "$(status_missing_routes "$iface")" ]] && { printf 'degraded\n'; return 0; }
+  printf 'connected\n'
+}
+
+# status_missing_routes IFACE
+# Print the recorded routes that are NOT installed on IFACE, space separated.
+# Prints nothing when the expected set is unknown, which is not the same as
+# nothing missing - the caller has to tell those apart and say so.
+status_missing_routes() {
+  local iface="$1" expected missing="" cidr
+  expected="$(state_get VPN_STATE_ROUTES)"
+  [[ -n "$expected" ]] || return 0
+  local -a want
+  IFS=, read -ra want <<< "$expected"
+  for cidr in "${want[@]}"; do
+    [[ -n "$cidr" ]] || continue
+    ip route show "$cidr" dev "$iface" 2>/dev/null | grep -q . || missing+="${cidr} "
+  done
+  printf '%s' "${missing% }"
+}
+
+# default_route_verdict IFACE
+# Print "<device> <verdict>" for the container's default route, where verdict is
+# one of: ok, broken, not-pushed. Judged against the declared tunnel mode, never
+# against a fixed rule - a container that asked for a full tunnel must not be
+# told its default route is in the wrong place.
+#
+# One implementation, called by both the connect report and the status report.
+# Two would drift, and the one in the connect report is the one an operator sees
+# least often, so it would drift silently.
+default_route_verdict() {
+  local iface="$1" mode dev
+  mode="$(tunnel_mode)"
+  dev="$(ip route show default 2>/dev/null \
+           | awk '{for (i=1;i<NF;i++) if ($i=="dev") {print $(i+1); exit}}')" || dev=""
+
+  if [[ "$mode" == "full" ]]; then
+    if [[ -n "$dev" && "$dev" == "$iface" ]]; then
+      printf '%s ok\n' "$dev"
+    else
+      printf '%s not-pushed\n' "${dev:-<none>}"
+    fi
+  else
+    if [[ -n "$dev" && "$dev" == "$iface" ]]; then
+      printf '%s broken\n' "$dev"
+    else
+      printf '%s ok\n' "${dev:-<none>}"
+    fi
+  fi
+}
+
+# STATE_KEYS - the keys the connection record may hold. A reader accepts these
+# and nothing else.
+STATE_KEYS="VPN_STATE_IFACE VPN_STATE_ROUTES VPN_STATE_ROUTE_SOURCE VPN_STATE_CLIENT VPN_STATE_PID VPN_STATE_CONNECTED_AT VPN_STATE_RESOLV"
+
+# state_get KEY
+# Print the recorded value for KEY, or nothing when there is no record, no such
+# key, or the value is not one this writer could have produced.
+#
+# The record is NOT sourced, and that is deliberate. /etc/vpn-client.env is
+# root-owned, but the record's directory is owned by the container's login user
+# so that a non-root container can write it with no added privilege. Sourcing a
+# user-writable file is harmless when the same user reads it - and an privilege
+# escalation the moment root asks a --user container for its state. A diagnostic
+# command is an absurd way to hand out root.
+#
+# So values are matched against the same conservative set env_kv writes bare.
+# Every value this record holds - an interface name, a comma-separated CIDR list,
+# a process name, digits - is inside it by construction, so nothing is lost, and
+# anything else is treated as absent, which callers already have to handle.
+state_get() {
+  local key="$1"
+  [[ " ${STATE_KEYS} " == *" ${key} "* ]] || return 0
+  [[ -r "$VPN_STATE_FILE" ]] || return 0
+  local line value
+  while IFS= read -r line; do
+    [[ "$line" == "${key}="* ]] || continue
+    value="${line#*=}"
+    [[ "$value" =~ ^[A-Za-z0-9._/:,@%+=-]*$ ]] || return 0
+    printf '%s\n' "$value"
+    return 0
+  done < "$VPN_STATE_FILE"
+}
+
+# state_client_alive
+# True when the record names a client that is actually running. The record
+# outlives the client that wrote it - a client can exit without removing it - so
+# a record on its own says nothing about whether a tunnel is live.
+#
+# Both the pid and the process name are checked, because pids are recycled: a
+# dead client's pid can belong to something unrelated, and a stale tunnel would
+# then report as live.
+state_client_alive() {
+  local pid name running
+  pid="$(state_get VPN_STATE_PID)"
+  name="$(state_get VPN_STATE_CLIENT)"
+  [[ -n "$pid" && -n "$name" ]] || return 1
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  running="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')" || running=""
+  [[ "$running" == "$name" ]]
+}
+
 # record_connection IFACE ROUTES SOURCE
 # SOURCE is "configured" or "detected", saying where ROUTES came from.
 #
@@ -325,6 +493,9 @@ record_connection() {
     env_kv VPN_STATE_CLIENT "$client"
     env_kv VPN_STATE_PID "$pid"
     env_kv VPN_STATE_CONNECTED_AT "$(date +%s)"
+    # The baseline the status report compares against. Absent in every record
+    # written before this existed, which the reader treats as "cannot tell".
+    env_kv VPN_STATE_RESOLV "$(resolv_fingerprint)"
   } > "$tmp" 2>/dev/null || {
     echo "WARNING: cannot write ${VPN_STATE_FILE}; this connection will not be recorded." >&2
     rm -f "$tmp" 2>/dev/null || true

@@ -285,9 +285,38 @@ The declaration does two things. For OpenVPN it decides how the client treats th
 
 For every protocol, including the three whose clients cannot be told any of this, it decides how `vpn connect` reports the default route. A `full` container is told its default route on the tunnel is expected. A `split` container whose client took the default route anyway is told the invariant is broken, in as many words - and the route is left alone, because this reports the invariant rather than enforcing it. Reject a design that silently rewrites it.
 
+### Asking what the tunnel is doing
+
+```bash
+lxc exec vpn-example-fortissl -- vpn status
+```
+
+One screen, no flags, and it changes nothing: every command it runs is a read, and
+it will not install a route it finds missing. The state is in the text rather than
+the exit status - reporting successfully is success, whatever the state, so this is
+a report for a person rather than something to branch on in a script.
+
+| State       | What it means                                                                    |
+| ----------- | ---------------------------------------------------------------------------------- |
+| `down`      | no client running and no tunnel interface                                          |
+| `connected` | client running, interface up, every expected route installed, default route where the declared mode says |
+| `degraded`  | client running, but a route is missing or the default route is not where the declared mode says |
+| `stale`     | no client running, but the interface and its routes are still there - run `vpn disconnect` |
+
+Two things it is careful about. A client can exit without removing its record, so
+being alive is established from the process - both its id **and** its name, because
+ids get recycled - never from the record existing. And a connection made before
+records were written has no expected route set, which is reported as unknown rather
+than as nothing missing: `degraded` is never claimed on that basis alone.
+
+What it deliberately does not do: no reachability probing, because no target host
+is configured anywhere and picking one would be a guess; no reading the client's
+log, which needs a privilege the sudoers allowlist withholds on purpose; and no
+repair. It reports the split tunnel invariant, it does not enforce it.
+
 ### What a connect records
 
-While a tunnel is up, `vpn connect` records it in `/run/vpn-client/state`: the interface that actually came up, the effective route set and whether it was configured or detected, the client process and its PID, and when it connected. The file is transient by design - `/run` is tmpfs, so it is gone after a container restart - and a reader should treat it as absent when the recorded PID is no longer alive.
+While a tunnel is up, `vpn connect` records it in `/run/vpn-client/state`: the interface that actually came up, the effective route set and whether it was configured or detected, the client process and its PID, when it connected, and the resolver configuration as it stood. That last one is the baseline `vpn status` compares against - without it, whether DNS was rewritten is unanswerable, since a nameserver list on its own says nothing about whether it changed. The file is transient by design - `/run` is tmpfs, so it is gone after a container restart - and a reader should treat it as absent when the recorded PID is no longer alive.
 
 The directory is created by `/etc/tmpfiles.d/vpn-client.conf`, owned by the container login user so that a non-root `--user` container can write the record without any extra sudo privilege.
 
@@ -412,12 +441,12 @@ Notes:
 | GlobalProtect stuck on portal | confirm portal vs gateway URL; try `-v` |
 | GlobalProtect: `XML response has no "auth" node` | Portal is SAML-fronted (ADFS/Okta/Azure AD, often with Duo/2FA) - plain openconnect cannot finish that login. Use `connect-vpn-saml` then `connect-vpn-saml-finish` (installed alongside `vpn connect` for `--protocol gp` containers) - see "GlobalProtect with SAML SSO + 2FA (Duo etc)" below |
 | OpenVPN connects but no internal access | subnet missing from `VPN_ROUTES`; or the server pushes a different topology. Containers created before `VPN_TUNNEL_MODE` existed may also carry `VPN_ROUTE_NOPULL=1`, which discards the server's routes and makes `auto` find nothing - give those an explicit `--routes`, or remove that key |
-| SSH timeout to internal host | VPN up? `lxc exec vpn-X -- ip route` |
+| SSH timeout to internal host | `lxc exec vpn-X -- vpn status` - it names the state, the routes installed against those expected, and where the default route is |
 | host DNS/routes broken | VPN was started on the host - stop it and delete leftover `vpn0` |
 | fortissl: "requires interactive password entry" | missing `-t`: use `lxc exec -t vpn-X -- vpn connect` |
 | fortissl: PPP interface never appears | wrong password, or 2FA gateway without `VPN_FORTI_OTP_REQUIRED` set - check `sudo tail /var/log/openfortivpn.log` |
 | `vpn connect` stops at a sudo password prompt | non-root `--user` and a path is missing from the plugin's `proto_sudo_commands`; fix, then `--refresh-helpers` |
-| `vpn disconnect` says "VPN down." but traffic still flows | a process name is missing from the plugin's `proto_client_processes`; fix, then `--refresh-helpers` |
+| `vpn disconnect` says "VPN down." but traffic still flows | `vpn status` reporting `stale` confirms it - the client is gone but the interface and its routes remain. A process name missing from the plugin's `proto_client_processes` is the usual cause; fix, then `--refresh-helpers` |
 | a fix from a newer version of this repo has no effect | the container still has the helpers it was created with - `--refresh-helpers` |
 | fortissl: "Couldn't set tty to PPP discipline" on connect | Check `grep ppp /proc/tty/ldiscs` **on the host**. Empty: `sudo modprobe ppp_async` and persist it, see prerequisites - a container restart cannot fix this. Present: `lxc restart vpn-X` clears a stuck `/dev/ppp`, and if the container predates the disconnect fix, also `--refresh-helpers` |
 | fortissl: tunnel is up but `VPN_ROUTES` are not applied and nothing is in `/run/vpn-client/state` | The PPP wait loop used to abort the whole connect on its first iteration - `grep` exits 1 while no `ppp*` interface exists yet, and under `set -euo pipefail` that killed the script. The client survived because it runs under detached `screen`, so the tunnel came up unrouted and unrecorded. Fixed; run `--refresh-helpers` on containers created before it |

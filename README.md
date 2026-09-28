@@ -31,6 +31,14 @@ cd vpn-isolation
 
 Full guide: [`docs/lxd-vpn-client-containers.md`](docs/lxd-vpn-client-containers.md)
 
+Inside a container there is one command, `vpn`, with three subcommands:
+
+```bash
+lxc exec vpn-example-anyconnect -- vpn connect
+lxc exec vpn-example-anyconnect -- vpn status      # what it is doing; changes nothing
+lxc exec vpn-example-anyconnect -- vpn disconnect
+```
+
 **After pulling a newer version of this repo**, existing containers keep the helpers they were created with. Update them in place (works on a stopped container, touches nothing else):
 
 ```bash

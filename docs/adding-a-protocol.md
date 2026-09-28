@@ -100,7 +100,8 @@ proto_version_cmd() { echo "some-client --version | head -1"; }
 #
 # It may also install an extra container command, for a login flow that a
 # single command cannot express - protocol-gp.sh generates one for SAML
-# portals. Such a command is its own executable, never a subcommand of `vpn`:
+# portals. Such a command is its own executable, never a subcommand of `vpn`
+# (whose verbs are connect, disconnect and status):
 # the subcommands are the framework's verbs, so a plugin cannot change the
 # shape of the surface an operator has learned, and the framework needs no
 # mechanism for plugins to register verbs.

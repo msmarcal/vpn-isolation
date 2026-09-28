@@ -47,12 +47,19 @@ lxc exec vpn-example-anyconnect -- vpn disconnect
 
 ## Supported protocols
 
-| Protocol | Flag |
-|---|---|
-| Cisco AnyConnect (with optional MFA) | `--protocol anyconnect` |
-| Palo Alto GlobalProtect | `--protocol gp` |
-| OpenVPN | `--protocol openvpn --ovpn <file>` |
-| FortiGate SSL VPN | `--protocol fortissl` (needs `ppp_async` loaded on the **host**, see below) |
+| Protocol | Flag | Browser-based SSO |
+|---|---|---|
+| Cisco AnyConnect (with optional MFA) | `--protocol anyconnect` | yes |
+| Palo Alto GlobalProtect | `--protocol gp` | yes, with host-side automation |
+| OpenVPN | `--protocol openvpn --ovpn <file>` | no - the community client has no equivalent |
+| FortiGate SSL VPN | `--protocol fortissl` (needs `ppp_async` loaded on the **host**, see below) | yes |
+
+**SSO** means the login happens in a browser on your own machine - SAML portals with
+a second factor - and a short-lived credential is carried in. `vpn connect --sso`
+inside the container prints where to go and prompts; `scripts/vpn-sso-login.sh
+<container>` does it from your machine and, for GlobalProtect, reads the credential
+out of the browser automatically. See
+[the full section](docs/lxd-vpn-client-containers.md#sso-logins-saml-with-a-second-factor).
 
 **FortiGate SSL VPN has one host-side prerequisite.** The container gets `/dev/ppp`
 from the profile, but the PPP line discipline `pppd` needs lives in a module the

@@ -333,6 +333,7 @@ Because the file is `source`d, it is shell syntax. Plain values (hostnames, path
 | `VPN_INTERFACE` | all | Expected tunnel interface. `vpn0` by default, `ppp0` for fortissl. `vpn connect` overwrites it at runtime with whatever actually appeared. |
 | `VPN_GATEWAY` | anyconnect, gp, fortissl | Portal/gateway host, including any group path for anyconnect. |
 | `VPN_OVPN` | openvpn | Path to the profile inside the container (`/etc/openvpn/client/client.ovpn`). |
+| `VPN_AUTH_MODE` | all | `native` (default) or `sso`. Which authentication path a bare `vpn connect` takes. **Absent in containers created before it existed**, where it reads as `native`. `vpn connect --sso` / `--native` override it for one run without writing here. Setting it to `sso` for a protocol with no SSO path makes `vpn connect` refuse, naming the protocol. |
 | `VPN_TUNNEL_MODE` | all | `split` (default) or `full`. Declares whether the container's default route should stay on `eth0`. It is intent, not mechanism: OpenVPN derives its client flags from it, and for every protocol it decides how `vpn connect` describes the default route. **Absent in containers created before it existed**, where it is derived - `full` when `VPN_ROUTE_NOPULL=0`, `split` otherwise - so nothing has to be edited. |
 | `VPN_ROUTE_NOPULL` | openvpn | `1` passes `--route-nopull`, discarding every route the server pushes. `0` accepts them all. **Written only when asked for**, and it overrides `VPN_TUNNEL_MODE` when present, so a container that has it keeps behaving exactly as it did. No flag sets it any more; add it by hand for the rare case where you want the client to ignore the server's routes entirely. |
 | `VPN_FORTI_USER` | fortissl | Username passed to `openfortivpn`. Falls back to `$USER` if empty. |
@@ -384,52 +385,91 @@ lxc exec vpn-newproject -- vim /etc/vpn-client.env
 
 Or re-run `create-vpn-lxd-container.sh` with a new `--name` / `--protocol`.
 
-## GlobalProtect with SAML SSO + 2FA (Duo etc)
+## SSO logins (SAML, with a second factor)
 
-Some GlobalProtect portals are configured for SAML SSO (redirecting to an
-ADFS/Okta/Azure AD login page, often with Duo push/code as a second factor)
-instead of a native username/password form. `openconnect --protocol=gp`
-cannot complete that login on its own - the server never returns the XML
-`<auth>` form it expects, it returns an HTML/JS login page instead, and
-`vpn connect` fails immediately with:
+Corporate portals increasingly front their login with SAML - ADFS, Okta, Azure AD -
+usually with a second factor. The VPN client never sees a password: the exchange
+happens in a browser, and a short-lived session credential comes back.
 
-```
-XML response has no "auth" node
-Failed to complete authentication
-```
+Supported for `anyconnect`, `gp` and `fortissl`. OpenVPN has no equivalent in the
+community client, so `--auth-mode sso` is refused for it at creation.
 
-Duo happens inside that SAML/ADFS exchange, so openconnect never even reaches
-the point of asking for a second factor.
+> **Renamed.** This replaced two commands `--protocol gp` containers used to
+> carry, `connect-vpn-saml` and `connect-vpn-saml-finish`. They are removed by
+> `--refresh-helpers`, and `vpn connect --sso` covers the same flow through the
+> checked path - those two were never parse-checked and had been failing at runtime
+> with a message blaming an expired cookie.
 
-Containers created with `--protocol gp` get two extra helper scripts for this
-case, alongside the normal `vpn connect`:
+### Which path a connect takes
 
 ```bash
-# Step 1 - ask openconnect for the SAML login URL
-lxc exec vpn-X -- connect-vpn-saml
-# prints a long https://sts.<company>.com/adfs/ls/... URL
-
-# Step 2 - open that URL in a browser OUTSIDE the container (your laptop),
-# log in normally and approve the Duo prompt. Then, in browser DevTools ->
-# Network tab, find the POST to .../SAML20/SP/ACS (or similar) and copy two
-# values from its response: prelogin-cookie (sometimes portal-userauthcookie)
-# and saml-username.
-
-# Step 3 - feed those values back in to finish the handshake
-lxc exec vpn-X -- connect-vpn-saml-finish "<prelogin-cookie>" "<saml-username>"
+lxc exec -t vpn-example-gp -- vpn connect --sso      # browser login
+lxc exec -t vpn-example-gp -- vpn connect --native   # the client's own prompts
+lxc exec -t vpn-example-gp -- vpn connect            # whatever VPN_AUTH_MODE says
 ```
 
-Notes:
-- The prelogin-cookie is short-lived - if `connect-vpn-saml-finish` reports
-  the tunnel interface never appeared, the cookie likely expired; repeat from
-  `connect-vpn-saml`.
-- Both scripts default to `--usergroup=gateway[:prelogin-cookie]`; pass
-  `portal` (step 1) / `portal:portal-userauthcookie` (step 3, as the optional
-  3rd argument) if your portal uses the portal path instead of the gateway
-  path - the SAML URL output or your IT team's GlobalProtect docs will tell
-  you which one applies.
-- Plain (non-SAML) GlobalProtect portals are unaffected - they keep working
-  with the normal `vpn connect`.
+`--auth-mode native|sso` at creation sets the default; either is selectable per
+connect regardless, and the flags never write to `/etc/vpn-client.env`. Absent
+in containers created before this existed, where it reads as `native`.
+
+### By hand, inside the container
+
+`vpn connect --sso` prints where to log in and then prompts for what the browser
+produced:
+
+```
+Open this in a browser on your own machine, NOT in this container:
+
+  https://sts.example.com/adfs/ls/?SAMLRequest=...
+
+Paste the values from the browser:
+  SAML username from the browser: alice@example.com
+  Session cookie (...):
+  Usergroup path [gateway:prelogin-cookie]:
+  Server that authenticated the exchange [vpn.example.com]:
+```
+
+The credential goes to the client on its standard input, never as an argument, so
+it does not appear in the container's process table. It needs a terminal, hence
+`lxc exec -t`.
+
+Reading the credential out of the browser's developer tools is the slow part, and
+these cookies live for seconds rather than minutes. That race is why the next
+section exists.
+
+### With the host-side helper
+
+```bash
+./scripts/vpn-sso-login.sh vpn-example-gp
+```
+
+For GlobalProtect it drives [`gp-saml-gui`](https://github.com/dlenski/gp-saml-gui)
+(`sudo apt install gp-saml-gui`), which embeds a browser, carries out the exchange
+and reads the credential out of the response headers - no developer tools and no
+race. It then hands the values to the container over standard input.
+
+Four values come out of that exchange and all four are carried: the SAML username,
+the credential, **which kind** of credential it is (a portal can return either a
+prelogin cookie or a portal user-auth cookie, and that selects the usergroup path),
+and the server the exchange **actually** authenticated against, which may differ
+from the one first contacted when the portal redirects. Assuming either of the last
+two is why the helpers this replaced could not connect some portals at all.
+
+The helper is optional in both directions. A container works with no helper present
+- the section above is the whole flow - and the helper falls back to exactly that
+when the extraction tool is not installed, saying why. It refuses a stopped
+container rather than starting it, since that would be a change to your environment
+you did not ask for.
+
+**It never runs a VPN client.** Isolating the VPN from the host is the point of this
+project, so the helper does not use `gp-saml-gui`'s options that would exec
+`openconnect` on your machine. It also passes the option that stops the tool storing
+an identity-provider session on disk, since this project does not keep credentials.
+
+**A second factor that needs a hardware security key will not work through the
+helper**, because the embedded browser does not support WebAuthn. Phone push and
+one-time codes are ordinary web content and do. For a security key, use the manual
+flow above with your real browser.
 
 ## Troubleshooting
 
@@ -439,7 +479,10 @@ Notes:
 | Cisco/ASA auth 404 on `/` | rebuild openconnect (`--build-openconnect`) |
 | MFA/token login failed before token prompt | account lockout - wait / ask the VPN provider's IT |
 | GlobalProtect stuck on portal | confirm portal vs gateway URL; try `-v` |
-| GlobalProtect: `XML response has no "auth" node` | Portal is SAML-fronted (ADFS/Okta/Azure AD, often with Duo/2FA) - plain openconnect cannot finish that login. Use `connect-vpn-saml` then `connect-vpn-saml-finish` (installed alongside `vpn connect` for `--protocol gp` containers) - see "GlobalProtect with SAML SSO + 2FA (Duo etc)" below |
+| GlobalProtect: `XML response has no "auth" node` | Portal is SAML-fronted (ADFS/Okta/Azure AD, often with a second factor) - a plain connect cannot finish that login. Use `vpn connect --sso`, or `scripts/vpn-sso-login.sh <container>` from your own machine - see "SSO logins" above |
+| SSO: `the login did not complete - no credential was supplied` | The browser step was abandoned, or a required value was left empty. Nothing was sent to the gateway; this is **not** an expired credential |
+| SSO: `the gateway refused the credential, or it had already expired` | The credential reached the gateway and was rejected. These live for seconds - repeat the browser step without pausing, or use the host-side helper, which removes the delay |
+| SSO: `could not get a login URL` | The gateway was not reachable or did not offer SSO. No credential has been sent - distinct from either row above |
 | OpenVPN connects but no internal access | subnet missing from `VPN_ROUTES`; or the server pushes a different topology. Containers created before `VPN_TUNNEL_MODE` existed may also carry `VPN_ROUTE_NOPULL=1`, which discards the server's routes and makes `auto` find nothing - give those an explicit `--routes`, or remove that key |
 | SSH timeout to internal host | `lxc exec vpn-X -- vpn status` - it names the state, the routes installed against those expected, and where the default route is |
 | host DNS/routes broken | VPN was started on the host - stop it and delete leftover `vpn0` |

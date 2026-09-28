@@ -139,6 +139,102 @@ proto_connect() {
 EOF
 }
 
+# ---------------------------------------------------------------------------
+# SSO
+#
+# FortiGate portals can be fronted by SAML too. openfortivpn cannot do that
+# exchange, but it accepts the session cookie the gateway sets once a browser has
+# finished it - `--cookie-on-stdin`, which is also the only form that keeps the
+# credential out of the process table.
+#
+# Unlike the openconnect protocols there is no unauthenticated request that yields
+# a login URL, so the URL here is the portal itself.
+# ---------------------------------------------------------------------------
+
+proto_sso_values() {
+  printf 'cookie|secret||SVPNCOOKIE value from the browser\n'
+}
+
+# Nothing. The SSO path runs only openfortivpn, which proto_sudo_commands already
+# allows. Deliberately NOT granting a shell or setsid: `sudo bash` and
+# `sudo setsid <anything>` are both a root shell, which would undo the point of
+# having a narrow allowlist at all.
+proto_sso_sudo_commands() { echo ""; }
+
+proto_sso_url_snippet() {
+  cat <<'EOF'
+proto_sso_url() {
+  [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; return 1; }
+  cat <<TEXT
+
+Open this in a browser on your own machine, NOT in this container:
+
+  https://${VPN_GATEWAY}:${VPN_FORTI_PORT:-443}/remote/login
+
+Sign in, approve the second factor, then read the SVPNCOOKIE cookie the gateway
+set, from the browser's cookie inspector. It is short-lived, so do this without
+pausing.
+TEXT
+  return 0
+}
+EOF
+}
+
+proto_sso_connect_snippet() {
+  cat <<'EOF'
+proto_sso_connect() {
+  echo
+  echo "Completing SAML login to ${VPN_GATEWAY}:${VPN_FORTI_PORT:-443}"
+
+  # The cookie goes in on standard input, through a FIFO. Not as an argument,
+  # which the process table shows; not through the environment, which /proc shows
+  # to anything running as the same user. The FIFO is 0600 and removed as soon as
+  # it has been read.
+  #
+  # No `screen` here, unlike the native path, and that is the interesting part.
+  # Screen exists there because openfortivpn has to prompt for a password and
+  # cannot daemonize. This path does not prompt - the credential arrives on stdin -
+  # so the client is simply backgrounded with the FIFO as its input. Running it
+  # under screen would mean `sudo screen ... bash -c '... < fifo'`, and allowing
+  # `sudo bash` is a root shell: it would undo the narrow allowlist entirely.
+  #
+  # The risk this leaves, and it cannot be settled without the real gateway: if
+  # openfortivpn insists on a tty even with the cookie on stdin, this fails with
+  # the interface never appearing, and the error path below says so.
+  local fifo
+  fifo="$(mktemp -u "${TMPDIR:-/tmp}/.vpn-sso.XXXXXX")"
+  mkfifo -m 600 "$fifo" || { echo "ERROR: could not create a pipe for the cookie." >&2; return 1; }
+
+  # Backgrounded, so its exit status cannot abort this function; the interface
+  # appearing is the verdict, the same as on the other protocols' SSO paths.
+  sudo openfortivpn "${VPN_GATEWAY}:${VPN_FORTI_PORT:-443}" --cookie-on-stdin \
+    < "$fifo" >> /var/log/openfortivpn.log 2>&1 &
+  disown
+
+  printf '%s' "$SSO_cookie" > "$fifo"
+  rm -f "$fifo"
+
+  echo "openfortivpn started in screen session, waiting for interface..."
+
+  local i new_iface=""
+  for i in $(seq 1 "${VPN_PPP_WAIT:-60}"); do
+    new_iface="$(ip -o link show | awk -F': ' '{print $2}' | grep '^ppp' | head -1)" || new_iface=""
+    [[ -n "$new_iface" ]] && break
+    sleep 1
+  done
+
+  if [[ -z "$new_iface" ]]; then
+    echo "ERROR: the gateway refused the cookie, or it had already expired." >&2
+    echo "       These live for seconds. Run 'vpn connect --sso' again and do the" >&2
+    echo "       browser step without pausing. Last log lines:" >&2
+    sudo tail -n 20 /var/log/openfortivpn.log >&2 || true
+    return 1
+  fi
+  VPN_INTERFACE="$new_iface"
+}
+EOF
+}
+
 proto_version_cmd() { echo "openfortivpn --version 2>&1 | head -1"; }
 
 # proto_disconnect_snippet: the generic teardown (stop_client on each process)

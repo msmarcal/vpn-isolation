@@ -285,6 +285,88 @@ tunnel_mode() {
 # leftovers.
 VPN_STATE_FILE="${VPN_STATE_FILE:-/run/vpn-client/state}"
 
+# auth_mode
+# Print "native" or "sso": which authentication path this container uses by
+# default. Absent means native, so a container created before this existed keeps
+# behaving as it did - a refresh never rewrites /etc/vpn-client.env.
+auth_mode() {
+  case "${VPN_AUTH_MODE:-}" in
+    native|sso) printf '%s\n' "$VPN_AUTH_MODE" ;;
+    "")         printf 'native\n' ;;
+    *)          echo "WARNING: VPN_AUTH_MODE='${VPN_AUTH_MODE}' is not native or sso; using native." >&2
+                printf 'native\n' ;;
+  esac
+}
+
+# require_tty WHAT
+# Fail with a message naming how to attach a terminal. Collecting anything from an
+# operator needs one, and without this the read silently gets nothing.
+require_tty() {
+  [[ -t 0 ]] && return 0
+  echo "ERROR: ${1} needs a terminal to read from." >&2
+  echo "       Run it as: lxc exec -t <container> -- vpn ..." >&2
+  echo "       Or supply the values on standard input with --from-stdin." >&2
+  return 1
+}
+
+# sso_values_read
+# Read NAME=VALUE lines from standard input into SSO_<NAME> variables. This is the
+# form an automated caller uses - the host-side helper - so it needs no terminal.
+# Values are taken literally; nothing here is evaluated.
+sso_values_read() {
+  local line name value
+  while IFS= read -r line; do
+    [[ "$line" == *=* ]] || continue
+    name="${line%%=*}"
+    value="${line#*=}"
+    [[ "$name" =~ ^[a-z][a-z0-9_-]*$ ]] || continue
+    # shellcheck disable=SC2163
+    printf -v "SSO_${name//-/_}" '%s' "$value" 2>/dev/null \
+      || eval "SSO_${name//-/_}=\$value"
+  done
+}
+
+# sso_values_collect DECLARATION
+# Fill in the values a protocol declared. DECLARATION is one per line:
+#
+#   name|kind|default|prompt
+#
+# kind is "secret" (read without echo) or "plain". An empty default makes the
+# value required. A value already present as SSO_<name> - supplied on standard
+# input - is used as it is and never prompted for.
+#
+# The framework collects; the plugin only declares. That keeps one implementation
+# of the rules about terminals and about never putting a credential in a command
+# line, instead of each plugin getting them slightly wrong.
+sso_values_collect() {
+  local decl="$1" line name kind default prompt var value
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    IFS='|' read -r name kind default prompt <<< "$line"
+    var="SSO_${name//-/_}"
+    value="${!var-}"
+
+    if [[ -z "$value" ]]; then
+      if [[ -t 0 ]]; then
+        if [[ "$kind" == "secret" ]]; then
+          read -r -s -p "  ${prompt:-$name}: " value; echo
+        else
+          read -r -p "  ${prompt:-$name}${default:+ [$default]}: " value
+        fi
+      fi
+    fi
+
+    [[ -n "$value" ]] || value="$default"
+
+    if [[ -z "$value" ]]; then
+      echo "ERROR: no value for '${name}' (${prompt:-required})." >&2
+      return 1
+    fi
+    eval "${var}=\$value"
+  done <<< "$decl"
+  return 0
+}
+
 # resolv_fingerprint
 # A stable description of the container's resolver configuration: the nameservers
 # it currently lists, comma separated. The list rather than a digest, because a

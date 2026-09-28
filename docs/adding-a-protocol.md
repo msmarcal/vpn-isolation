@@ -147,6 +147,67 @@ proto_post_install() {
 # an LXD container).
 proto_write_env_interface() { echo "ppp0"; }
 
+# OPTIONAL, all of these or none: the SSO path, for a gateway that fronts its
+# login with SAML. A partial set is refused at startup naming what is missing.
+#
+# The container cannot open a browser - it has none, no display and no path to the
+# operator's session, which is the isolation it exists for. So it prints where to
+# go and takes back what the browser produced.
+#
+# Declare the values; do NOT prompt for them. The framework collects, which is
+# where the rules about terminals and about never putting a credential in an
+# argument are enforced. A plugin that prompted for its own would have to
+# reimplement those, and each one would get them slightly wrong.
+#
+#   name|kind|default|prompt      kind is "secret" (no echo) or "plain";
+#                                 an empty default makes the value required.
+#
+# This runs on the HOST, so orchestrator globals like $GATEWAY are available for a
+# default - unlike the snippets below.
+proto_sso_values() {
+  printf 'cookie|secret||Session cookie from the browser\n'
+  printf 'server|plain|%s|Server that authenticated the exchange\n' "${GATEWAY:-}"
+}
+
+# Text spliced into the container, defining proto_sso_url: print where to log in,
+# return non-zero when the gateway could not be asked. Getting the URL sends no
+# credential, so a failure here must read as "could not ask", never as "refused".
+proto_sso_url_snippet() { cat <<'EOF'
+proto_sso_url() { ...; }
+EOF
+}
+
+# Text spliced into the container, defining proto_sso_connect: consume the
+# collected values as $SSO_<name>, bring up the tunnel, leave the interface in
+# VPN_INTERFACE. Like proto_connect it must NOT touch routing.
+#
+# Hand the credential to the client on its STANDARD INPUT. Not as an argument,
+# which the process table shows; not through the environment, which /proc shows to
+# anything running as the same user.
+proto_sso_connect_snippet() { cat <<'EOF'
+proto_sso_connect() { ...; }
+EOF
+}
+
+# OPTIONAL: extra absolute paths the SSO path runs under sudo. Return nothing when
+# it needs none. Never ask for a shell or setsid here: `sudo bash` and
+# `sudo setsid <anything>` are both a root shell, which would undo the point of
+# having a narrow allowlist.
+proto_sso_sudo_commands() { echo ""; }
+
+# OPTIONAL, host-side: obtain the declared values automatically, for the optional
+# helper in scripts/vpn-sso-login.sh. Print them as name=value lines, one per
+# declared name. It runs where a browser exists, which no container-side function
+# can assume.
+#
+# It MUST NOT bring up a tunnel on the host. If it drives a tool that can do that,
+# do not use that mode - the failure this project exists to prevent is the VPN
+# landing on the operator's machine.
+proto_sso_host_extract() {
+  local name="$1"
+  # ... print username=..., cookie=..., etc.
+}
+
 # OPTIONAL: print (stdout) a bash function named exactly `proto_disconnect`,
 # spliced into the container's `vpn disconnect` in place of the default teardown.
 # Define it only when stopping the processes from proto_client_processes is

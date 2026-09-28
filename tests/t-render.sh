@@ -228,42 +228,16 @@ assert_survives "a missing path must not fail the install" '
   install_helpers testctr vpnuser'
 
 # ---------------------------------------------- plugin-installed extra helpers
-# protocol-gp.sh generates two more container scripts. install_helpers does not
-# parse-check those, so they are checked here: this is where a helper that
-# called functions it never carried went unnoticed.
-: > "$STUB_LOG"; rm -f "${STUB_PUSH_DIR:?}"/*
-( source "${LIB_DIR}/common.sh"; source "${LIB_DIR}/orchestrator.sh"
-  PROTOCOL=gp; source "${LIB_DIR}/protocol-gp.sh"
-  proto_post_install testctr ) >/dev/null 2>&1
-
-for f in connect-vpn-saml connect-vpn-saml-finish; do
-  if [[ -f "${STUB_PUSH_DIR}/${f}" ]]; then
-    pass
-    parses_ok "${f} parses" "$(cat "${STUB_PUSH_DIR}/${f}")"
-  else
-    fail "proto_post_install pushes ${f}" "not found in the push capture"
-  fi
-done
-
-fin="$(cat "${STUB_PUSH_DIR}/connect-vpn-saml-finish" 2>/dev/null || true)"
-for fn in wait_for_iface finish_connect apply_split_routes; do
-  assert_contains "connect-vpn-saml-finish defines ${fn}" "$fin" "${fn}() {"
-done
-assert_contains "connect-vpn-saml-finish delegates to finish_connect" "$fin" 'finish_connect "$VPN_INTERFACE"'
-assert_contains "and publishes the client names" "$fin" 'VPN_CLIENT_PROCESSES='
-
-# A plugin-installed command must not tell the operator to run something that was
-# removed either. Its own name is stripped first, as above.
-for f in connect-vpn-saml connect-vpn-saml-finish; do
-  t="$(cat "${STUB_PUSH_DIR}/${f}" 2>/dev/null || true)"
-  t="${t//connect-vpn-saml-finish/}"; t="${t//connect-vpn-saml/}"
-  assert_not_contains "${f} names no replaced command" "$t" 'connect-vpn'
-  assert_not_contains "${f} names no replaced disconnect" "$t" 'disconnect-vpn'
-done
-
-# Same ownership and mode the framework's own helpers get, and no `lxc exec`:
-# without that, refreshing a stopped gp container aborted under set -e.
-assert_contains "SAML helpers pushed as root:root 0755" "$(stub_log)" '--uid 0 --gid 0 --mode 0755'
-assert_not_contains "proto_post_install never runs lxc exec" "$(stub_log)" 'lxc exec'
+# protocol-gp.sh used to generate two more container scripts for SAML portals.
+# They were removed when the SSO path moved into the command itself, so no plugin
+# installs an extra command now. The contract still allows one, and the rules it
+# has to follow are in docs/adding-a-protocol.md - checked there rather than here,
+# because there is nothing left to render.
+: > "$STUB_LOG"
+if declare -f proto_post_install >/dev/null 2>&1; then
+  fail "no plugin should install extra container commands yet" \
+       "a proto_post_install appeared; it needs the carry-common.sh and \
+        delegate-to-finish_connect assertions this block used to make"
+else pass; fi
 
 finish

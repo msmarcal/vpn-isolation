@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
-# Records the call and does nothing. A VPN client must never actually run from
-# the suite: the whole point of this project is that a tunnel does not touch the
-# host, and a test that connected one would be the worst possible bug.
-echo "CLIENT $(basename "$0") $*" >> "${STUB_LOG:-/dev/null}"
+# Records the call and does nothing. A VPN client must never actually run from the
+# suite: the whole point of this project is that a tunnel does not touch the host.
+#
+# Records its standard input separately, which is how "the credential goes in on
+# stdin and never as an argument" is checked rather than assumed.
+echo "CLIENT openconnect $*" >> "${STUB_LOG:-/dev/null}"
+if [[ -n "${STUB_STDIN_LOG:-}" ]]; then
+  cat > "$STUB_STDIN_LOG" 2>/dev/null || true
+fi
+# STUB_SSO_URL non-empty makes the unauthenticated probe emit a login URL, which
+# is what the SSO path greps out of it.
+if [[ -n "${STUB_SSO_URL:-}" && "$*" != *--passwd-on-stdin* && "$*" != *--cookie-on-stdin* ]]; then
+  echo "SAML REDIRECT authentication is required via ${STUB_SSO_URL}"
+fi
+# STUB_CLIENT_FAIL non-empty makes it refuse, for the paths that must report a
+# rejected credential rather than a missing one.
+[[ -n "${STUB_CLIENT_FAIL:-}" ]] && exit 1
 exit 0

@@ -78,6 +78,9 @@ REFRESH_HELPERS=0
 # Empty means the operator did not say, and split is applied after parsing.
 TUNNEL_MODE=""
 TUNNEL_MODE_SOURCE=""      # which flag set it, for the contradiction check
+# AUTH_MODE is which authentication path the container uses by default. Empty
+# means the operator did not say, and native is applied after parsing.
+AUTH_MODE=""
 # ROUTE_NOPULL is openvpn's pre-existing setting, kept as an explicit override
 # that beats the declared mode. Empty means unset, and that is the point: an
 # absent key is what lets the mode decide, and writing a default here would make
@@ -134,6 +137,10 @@ Optional:
                             cannot act on it, it still governs how the default
                             route is reported.
   --no-route-nopull        Alias for --tunnel-mode full (kept for compatibility)
+  --auth-mode MODE         native (default) or sso. sso authenticates in a browser
+                            outside the container, for portals that front their
+                            login with SAML. Only for protocols that implement it;
+                            either mode is selectable per connect regardless.
   --launchpad-id ID        Import SSH keys via 'ssh-import-id lp:ID' (preferred)
   --github-id ID           Import SSH keys via 'ssh-import-id gh:ID' (combinable with --launchpad-id)
   --forti-user USER        For fortissl: FortiGate SSL VPN username (stored in /etc/vpn-client.env)
@@ -167,6 +174,12 @@ while [[ $# -gt 0 ]]; do
     --build-openconnect) BUILD_OPENCONNECT=1; shift ;;
     --privileged) PRIVILEGED=1; shift ;;
     --profile) PROFILE="${2:-}"; shift 2 ;;
+    --auth-mode)
+      case "${2:-}" in
+        native|sso) ;;
+        *) echo "ERROR: --auth-mode must be 'native' or 'sso', got '${2:-}'." >&2; exit 1 ;;
+      esac
+      AUTH_MODE="$2"; shift 2 ;;
     --tunnel-mode)
       case "${2:-}" in
         split|full) ;;
@@ -199,6 +212,7 @@ done
 # contradiction check above relies on. Split is the default because keeping the
 # default route off the tunnel is the reason these containers exist.
 TUNNEL_MODE="${TUNNEL_MODE:-split}"
+AUTH_MODE="${AUTH_MODE:-native}"
 
 if [[ -z "$NAME" ]]; then
   echo "ERROR: --name is required." >&2
@@ -350,6 +364,16 @@ for fn in proto_validate_args proto_needs_build_openconnect proto_apt_packages \
     exit 1
   fi
 done
+
+  # The SSO set is all-or-nothing, and asking for a mode the protocol cannot do is
+  # refused here - before any lxc call and before the protocol's own argument
+  # checks - rather than at the first connect.
+  if [[ "$AUTH_MODE" == "sso" ]] && ! proto_has_sso >/dev/null 2>&1; then
+    echo "ERROR: protocol '${PROTOCOL}' has no SSO path, so --auth-mode sso cannot apply." >&2
+    echo "       Its client authenticates directly. Drop the flag, or pick a protocol" >&2
+    echo "       whose plugin implements the SSO contract." >&2
+    exit 1
+  fi
 
 proto_validate_args
 

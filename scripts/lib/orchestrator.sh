@@ -33,6 +33,28 @@ helper_work_dir() {
   fi
 }
 
+# proto_has_sso - true when the sourced plugin implements the SSO path.
+#
+# All of the container-side functions or none: a partial set is refused at startup
+# with the missing name, the same way an incomplete required contract is. A plugin
+# that defines none simply has no SSO path, which is not an error.
+SSO_REQUIRED_FNS="proto_sso_url_snippet proto_sso_connect_snippet proto_sso_values"
+
+proto_has_sso() {
+  local fn found=0 missing=""
+  for fn in $SSO_REQUIRED_FNS; do
+    if declare -f "$fn" >/dev/null 2>&1; then found=1; else missing+="${fn} "; fi
+  done
+  (( found )) || return 1
+  if [[ -n "$missing" ]]; then
+    echo "ERROR: ${PROTOCOL} implements part of the SSO contract but is missing:" >&2
+    echo "       ${missing% }" >&2
+    echo "       It is all of ${SSO_REQUIRED_FNS} or none - see docs/adding-a-protocol.md." >&2
+    exit 1
+  fi
+  return 0
+}
+
 # render_vpn - print the in-container `vpn` command for $PROTOCOL.
 # The protocol lib must already be sourced.
 #
@@ -77,6 +99,22 @@ HEADER
   echo "# ---- protocol implementation (scripts/lib/protocol-${PROTOCOL}.sh) ----"
   proto_connect_snippet
   echo
+  # The SSO path, when the plugin implements it. Absent, the generated command
+  # still has its `--sso` flag but refuses it naming the protocol - better than a
+  # flag that silently does the wrong thing.
+  if proto_has_sso; then
+    echo
+    echo "# ---- SSO implementation (scripts/lib/protocol-${PROTOCOL}.sh) ----"
+    proto_sso_url_snippet
+    echo
+    proto_sso_connect_snippet
+    echo
+    printf 'PROTO_SSO_VALUES=%s\n' "$(printf '%q' "$(proto_sso_values)")"
+    printf 'PROTO_HAS_SSO=1\n'
+  else
+    printf '\nPROTO_HAS_SSO=0\n'
+  fi
+
   echo "# ---- protocol teardown (scripts/lib/protocol-${PROTOCOL}.sh) ----"
   if declare -f proto_disconnect_snippet >/dev/null 2>&1; then
     proto_disconnect_snippet
@@ -101,12 +139,37 @@ Usage: vpn <subcommand>
   disconnect  stop the client and remove the tunnel interface
   status      report what the tunnel is doing, and change nothing
 
+connect accepts:
+  --sso            authenticate in a browser outside this container
+  --native         authenticate with the client's own prompts
+  --from-stdin     with --sso, read the values as name=value lines instead
+                   of prompting (needs no terminal)
+
+Without a flag, connect uses the mode the container was created with.
+
 This container runs one VPN, so the subcommands do not name it.
 USAGE
 }
 
 do_connect() {
-  local p
+  local mode from_stdin=0 p
+  mode="$(auth_mode)"
+
+  while (( $# > 0 )); do
+    case "$1" in
+      --sso)        mode=sso; shift ;;
+      --native)     mode=native; shift ;;
+      --from-stdin) from_stdin=1; shift ;;
+      *) echo "vpn connect: unknown option '$1'" >&2; usage >&2; exit 2 ;;
+    esac
+  done
+
+  if [[ "$mode" == "sso" && "${PROTO_HAS_SSO:-0}" != "1" ]]; then
+    echo "ERROR: protocol '${VPN_PROTOCOL}' has no SSO path." >&2
+    echo "       Its client authenticates directly; run 'vpn connect' without --sso." >&2
+    exit 1
+  fi
+
   for p in $VPN_CLIENT_PROCESSES; do
     if pgrep -x "$p" >/dev/null 2>&1; then
       echo "A VPN client ($p) is already running. Run 'vpn disconnect' first." >&2
@@ -114,9 +177,37 @@ do_connect() {
     fi
   done
 
-  # proto_connect authenticates, brings up the tunnel, and leaves the interface
-  # that actually appeared in VPN_INTERFACE. It does nothing about routing.
-  proto_connect
+  if [[ "$mode" == "sso" ]]; then
+    # This container cannot open a browser - it has none, no display, and no path
+    # to the operator's session, which is the isolation it exists for. So it
+    # prints where to go and collects what comes back.
+    proto_sso_url || {
+      echo "ERROR: could not get a login URL from ${VPN_GATEWAY:-the gateway}." >&2
+      echo "       The gateway was not reachable or did not offer SSO. This is not" >&2
+      echo "       a rejected credential - nothing has been sent yet." >&2
+      exit 1
+    }
+
+    if (( from_stdin )); then
+      sso_values_read
+    else
+      require_tty "SSO login" || exit 1
+      echo
+      echo "Paste the values from the browser:"
+    fi
+    sso_values_collect "$PROTO_SSO_VALUES" || {
+      echo "ERROR: the login did not complete - no credential was supplied." >&2
+      echo "       Nothing was sent to the gateway. This is not an expired" >&2
+      echo "       credential; start again when the browser step is done." >&2
+      exit 1
+    }
+
+    proto_sso_connect
+  else
+    # proto_connect authenticates, brings up the tunnel, and leaves the interface
+    # that actually appeared in VPN_INTERFACE. It does nothing about routing.
+    proto_connect
+  fi
 
   finish_connect "$VPN_INTERFACE"
 }
@@ -242,7 +333,7 @@ do_status() {
 # `status` always reports success when it determined the state, whatever that
 # state is: it is a report for a person, and the state is carried by the text.
 case "${1:-}" in
-  connect)    do_connect ;;
+  connect)    shift; do_connect "$@" ;;
   disconnect) do_disconnect ;;
   status)     do_status ;;
   -h|--help)  usage ;;
@@ -261,9 +352,14 @@ DISPATCH
 # failing, and granting it would hand this user root-read on every file.
 render_sudoers() {
   local cmds
-  # Word splitting is the point: one path per line for paste.
-  # shellcheck disable=SC2046
-  cmds="$(printf '%s\n' $(proto_sudo_commands) /usr/sbin/ip /usr/bin/ip /usr/bin/pkill /usr/bin/kill | paste -sd, - | sed 's/,/, /g')"
+  local sso_cmds=""
+  if declare -f proto_sso_sudo_commands >/dev/null 2>&1; then
+    sso_cmds="$(proto_sso_sudo_commands)"
+  fi
+  # Word splitting is the point: one path per line for paste. sort -u because the
+  # SSO path usually needs the same binaries the native one already declared.
+  # shellcheck disable=SC2046,SC2086
+  cmds="$(printf '%s\n' $(proto_sudo_commands) ${sso_cmds} /usr/sbin/ip /usr/bin/ip /usr/bin/pkill /usr/bin/kill | sort -u | paste -sd, - | sed 's/,/, /g')"
   printf '%s ALL=(root) NOPASSWD: %s\n' "$1" "$cmds"
 }
 
@@ -383,6 +479,9 @@ render_env_file() {
   # it also governs how the default route is reported, which is what makes a
   # gateway-imposed full tunnel a stated outcome instead of an unexplained one.
   env_kv VPN_TUNNEL_MODE "${TUNNEL_MODE:-split}"
+  # Which authentication path this container uses by default. Overridable per
+  # invocation with `vpn connect --sso` / `--native`, which never writes here.
+  env_kv VPN_AUTH_MODE "${AUTH_MODE:-native}"
   proto_write_env_extra
 }
 

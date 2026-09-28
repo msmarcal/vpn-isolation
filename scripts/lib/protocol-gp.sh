@@ -81,150 +81,186 @@ EOF
 
 proto_version_cmd() { echo "openconnect --version 2>/dev/null | head -1"; }
 
-# proto_post_install: orchestrator-side hook (runs on the host, not inside the
-# container). GlobalProtect portals increasingly front SAML SSO (ADFS, Okta,
-# Azure AD...) instead of native username/password - openconnect alone cannot
-# complete that login (the SAML exchange, including any 2FA/Duo step, has to
-# happen in a real browser), and `vpn connect` fails with the tell-tale
-# 'XML response has no "auth" node'. This pushes two extra helper scripts into
-# the container, implementing the manual two-step flow documented by the
-# openconnect / gp-saml-gui community for GP+SAML portals:
+# ---------------------------------------------------------------------------
+# SSO
 #
-#   connect-vpn-saml [usergroup]
-#     Asks openconnect for the SAML login URL (instead of an XML auth form)
-#     and prints it, plus instructions.
+# GlobalProtect portals increasingly front their login with SAML (ADFS, Okta,
+# Azure AD...), often with a second factor. openconnect cannot finish that by
+# itself: the exchange happens in a browser, and the container has none. So the
+# container asks the gateway where to log in, prints it, and takes back what the
+# browser produced.
 #
-#   connect-vpn-saml-finish <prelogin-cookie> <saml-username> [usergroup]
-#     The user opens the printed URL in a browser OUTSIDE the container (host
-#     laptop, where Duo push/SSO normally works), completes SSO + Duo there,
-#     copies the prelogin-cookie + saml-username values out of the resulting
-#     page (browser DevTools Network tab, POST to .../SAML20/SP/ACS or
-#     similar), and passes them to this script. It feeds those values back
-#     into openconnect via --usergroup=gateway:prelogin-cookie
-#     --passwd-on-stdin, completing the handshake and bringing up the tunnel
-#     the same way `vpn connect` does.
-#
-# Both helpers carry scripts/lib/common.sh verbatim, exactly as the generated
-# the `vpn` command does. They are separate scripts in a container that has no copy
-# of this repo, so a shared function only exists there because its text was
-# pasted in. Without that, the calls below resolve to nothing: under
-# `set -euo pipefail` the failure surfaces as a misleading "tunnel interface
-# did not appear" while the tunnel is actually up and unrouted.
-#
-# Local script files are written to a temp dir and pushed with `lxc file
-# push`, matching the pattern protocol-openvpn.sh uses for its .ovpn profile -
-# far less fragile than nested single-quoted `lxc exec ... bash -c 'cat <<EOF'`
-# heredocs (see the apostrophe pitfall in the lxd-customer-vpn-isolation
-# skill).
-proto_post_install() {
-  local name="$1"
-  echo "==> Installing GlobalProtect SAML helper scripts (connect-vpn-saml, connect-vpn-saml-finish)"
+# Four values come out of that exchange and all four matter. Assuming any of them
+# is what made the helpers this replaced unable to connect a portal that returns
+# the other credential kind, or that redirects.
+# ---------------------------------------------------------------------------
 
-  local tmp
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
-
-  cat > "$tmp/connect-vpn-saml" <<'HELPER_EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-ENV_FILE=/etc/vpn-client.env
-[[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
-
-VPN_GATEWAY="${VPN_GATEWAY:?Set VPN_GATEWAY in /etc/vpn-client.env}"
-USERGROUP="${1:-gateway}"
-
-if pgrep -x openconnect >/dev/null 2>&1; then
-  echo "A VPN client is already running. Run 'vpn disconnect' first." >&2
-  exit 1
-fi
-
-echo "=== Step 1: fetch the SAML login URL from ${VPN_GATEWAY} ==="
-echo "(usergroup=${USERGROUP} - pass \"portal\" as arg1 to try the portal path instead of gateway)"
-echo
-
-set +e
-SAML_OUT="$(echo | sudo openconnect --protocol=gp --usergroup="${USERGROUP}" --os=linux-64 "$VPN_GATEWAY" 2>&1)"
-set -e
-echo "$SAML_OUT" | grep -iE "SAML|redirect|https://" || echo "$SAML_OUT"
-
-echo
-echo "=== Step 2: manual browser login (OUTSIDE this container, on your laptop) ==="
-echo "1. Copy the SAML URL printed above into a normal browser on your laptop -"
-echo "   NOT inside this container."
-echo "2. Log in with your corporate credentials and approve the Duo prompt."
-echo "3. After Duo succeeds, open browser DevTools -> Network tab and find the"
-echo "   POST request to .../SAML20/SP/ACS (or similar). In its response look for:"
-echo "     prelogin-cookie   (sometimes named portal-userauthcookie)"
-echo "     saml-username"
-echo "4. Copy those two values, then run on THIS container:"
-echo
-echo "     connect-vpn-saml-finish \"<prelogin-cookie value>\" \"<saml-username value>\""
-echo
-HELPER_EOF
-
-  {
-    cat <<'HELPER_EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-ENV_FILE=/etc/vpn-client.env
-[[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
-
-VPN_GATEWAY="${VPN_GATEWAY:?Set VPN_GATEWAY in /etc/vpn-client.env}"
-VPN_INTERFACE="${VPN_INTERFACE:-vpn0}"
-VPN_ROUTES="${VPN_ROUTES:-}"
-
-COOKIE="${1:?Usage: connect-vpn-saml-finish <prelogin-cookie> <saml-username> [usergroup]}"
-SAML_USER="${2:?Usage: connect-vpn-saml-finish <prelogin-cookie> <saml-username> [usergroup]}"
-USERGROUP="${3:-gateway:prelogin-cookie}"
-
-if pgrep -x openconnect >/dev/null 2>&1; then
-  echo "A VPN client is already running. Run 'vpn disconnect' first." >&2
-  exit 1
-fi
-HELPER_EOF
-    echo "# ---- shared helpers (copied verbatim from scripts/lib/common.sh) ----"
-    cat "${LIB_DIR}/common.sh"
-    echo
-    printf 'VPN_CLIENT_PROCESSES=%s\n' "$(printf '%q' "$(proto_client_processes)")"
-    cat <<'HELPER_EOF'
-
-echo "Completing GlobalProtect SAML auth as ${SAML_USER} (usergroup=${USERGROUP})"
-echo "$COOKIE" | sudo openconnect \
-  --protocol=gp \
-  --user="$SAML_USER" \
-  --usergroup="$USERGROUP" \
-  --os=linux-64 \
-  --passwd-on-stdin \
-  --interface="$VPN_INTERFACE" \
-  -b \
-  "$VPN_GATEWAY"
-
-NEW_IFACE="$(wait_for_iface "$VPN_INTERFACE" tun0)" || {
-  echo "ERROR: tunnel interface did not appear - cookie may be stale/expired (they are short-lived, retry from connect-vpn-saml if so)" >&2
-  exit 1
+# proto_sso_values: one per line, name|kind|default|prompt.
+# kind is "secret" (read without echo) or "plain"; an empty default is required.
+# Only what an operator actually has to supply. The server is deliberately NOT
+# declared: proto_sso_connect falls back to VPN_GATEWAY, and the host-side hook can
+# still send `server=` on stdin for the case where the exchange redirected - any
+# name=value that arrives is kept, whether or not it is declared. Interpolating the
+# gateway here instead would bake it into the rendered text, where a refresh - which
+# reads only VPN_PROTOCOL from the container - would render it empty and turn the
+# value into a required one nobody can answer.
+proto_sso_values() {
+  printf 'username|plain||SAML username from the browser\n'
+  printf 'cookie|secret||Session cookie (prelogin-cookie or portal-userauthcookie)\n'
+  printf 'usergroup|plain|gateway:prelogin-cookie|Usergroup path\n'
 }
-VPN_INTERFACE="$NEW_IFACE"
 
-# Same route resolution, recording and reporting as `vpn connect`. Delegated
-# rather than repeated, so a container behaves identically however its tunnel
-# was authenticated.
-finish_connect "$VPN_INTERFACE"
-HELPER_EOF
-  } > "$tmp/connect-vpn-saml-finish"
+# Absolute paths the SSO path runs under sudo, on top of proto_sudo_commands.
+proto_sso_sudo_commands() { echo "/usr/sbin/openconnect /usr/local/sbin/openconnect"; }
 
-  # Same ownership and mode install_helpers gives the vpn command: root:root 0755.
-  # Without --uid/--gid these land owned by the HOST user's numeric uid, which
-  # is unmapped inside the container, and group-writable by it.
-  #
-  # Setting the mode here also removes the `lxc exec ... chmod` this used to
-  # need. That matters beyond tidiness: --refresh-helpers re-runs this hook and
-  # is documented to work on a stopped container, where `lxc file push` works
-  # but `lxc exec` fails - and under `set -e` that aborted the whole refresh.
-  local f
-  for f in connect-vpn-saml connect-vpn-saml-finish; do
-    lxc file push --uid 0 --gid 0 --mode 0755 \
-      "$tmp/$f" "$name/usr/local/bin/$f" >/dev/null
+# proto_sso_url_snippet: defines proto_sso_url, which prints where to log in.
+proto_sso_url_snippet() {
+  cat <<'EOF'
+proto_sso_url() {
+  [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; return 1; }
+  local out
+  # Unauthenticated: this asks the portal for its auth form and gets a SAML
+  # redirect instead. openconnect exits non-zero having sent no credential, so
+  # the status is not a signal about one.
+  out="$(echo | sudo openconnect --protocol=gp --usergroup=gateway --os=linux-64 \
+           "$VPN_GATEWAY" 2>&1)" || true
+
+  local url
+  url="$(printf '%s\n' "$out" | grep -oE 'https://[^[:space:]]+' | head -1)" || url=""
+  [[ -n "$url" ]] || { printf '%s\n' "$out" >&2; return 1; }
+
+  cat <<TEXT
+
+Open this in a browser on your own machine, NOT in this container:
+
+  ${url}
+
+Sign in, approve the second factor, then open the browser's developer tools,
+find the POST to .../SAML20/SP/ACS and read these from its response headers:
+
+  saml-username      -> username below
+  prelogin-cookie    -> cookie below   (some portals send portal-userauthcookie;
+                        if so, set usergroup to portal:portal-userauthcookie)
+
+The cookie is short-lived, so do this without pausing.
+TEXT
+  return 0
+}
+EOF
+}
+
+# proto_sso_connect_snippet: defines proto_sso_connect, which consumes the
+# collected values and brings up the tunnel.
+proto_sso_connect_snippet() {
+  cat <<'EOF'
+proto_sso_connect() {
+  local server="${SSO_server:-$VPN_GATEWAY}"
+  echo
+  echo "Completing SAML login as ${SSO_username} against ${server}"
+  echo "  usergroup: ${SSO_usergroup}"
+
+  # The credential goes on stdin, never in the argument list: an argument is
+  # visible in the container's process table and in shell history.
+  printf '%s' "$SSO_cookie" | sudo openconnect \
+    --protocol=gp \
+    --user="$SSO_username" \
+    --usergroup="$SSO_usergroup" \
+    --os=linux-64 \
+    --passwd-on-stdin \
+    --interface="$VPN_INTERFACE" \
+    -b \
+    "$server" || true
+  # `|| true` on purpose: a client that refuses the credential exits non-zero, and
+  # under `set -euo pipefail` that would kill this function before the check below
+  # - so the operator would get no message at all instead of the one that says the
+  # credential was rejected. The interface appearing is the verdict, not the exit.
+
+  local new_iface
+  new_iface="$(wait_for_iface "$VPN_INTERFACE" tun0)" || {
+    echo "ERROR: the gateway refused the credential, or it had already expired." >&2
+    echo "       These cookies live for seconds, not minutes. Run 'vpn connect --sso'" >&2
+    echo "       again and do the browser step without pausing." >&2
+    return 1
+  }
+  VPN_INTERFACE="$new_iface"
+}
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Host-side extraction
+#
+# Optional, and it runs on the HOST, where a browser and a display exist. It
+# drives gp-saml-gui, which embeds a browser, carries out the SAML exchange and
+# reads the credential out of the response headers - so no developer tools, and no
+# race against a cookie that lives for seconds.
+# ---------------------------------------------------------------------------
+
+# proto_sso_host_parse - map gp-saml-gui's output to the declared value names.
+# Reads its stdout on standard input. Kept separate from the call so it can be
+# exercised against a recorded sample instead of a live login.
+#
+# The tool prints four shell-quoted KEY=VALUE lines. They are read as DATA, never
+# evaluated: a value must not be able to run anything, the same rule that governs
+# the container's environment file.
+proto_sso_host_parse() {
+  local line key value host="" user="" cookie="" server="" usergroup=""
+  while IFS= read -r line; do
+    [[ "$line" == *=* ]] || continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    # Strip the tool's own quoting without interpreting it.
+    [[ "$value" == \'*\' ]] && value="${value:1:${#value}-2}"
+    case "$key" in
+      HOST)   host="$value" ;;
+      USER)   user="$value" ;;
+      COOKIE) cookie="$value" ;;
+    esac
   done
+
+  [[ -n "$host" && -n "$user" && -n "$cookie" ]] || {
+    echo "ERROR: gp-saml-gui did not provide all of HOST, USER and COOKIE." >&2
+    return 1
+  }
+
+  # HOST carries two facts at once: the server the exchange actually authenticated
+  # against - which may differ from the one first contacted - and which credential
+  # kind came back, as the <interface>:<cookie-name> path. Neither is assumed.
+  local rest="${host#https://}"
+  rest="${rest#http://}"
+  server="${rest%%/*}"
+  usergroup="${rest#*/}"
+  [[ "$usergroup" != "$rest" ]] || usergroup="gateway:prelogin-cookie"
+
+  printf 'username=%s\n' "$user"
+  printf 'cookie=%s\n' "$cookie"
+  printf 'usergroup=%s\n' "$usergroup"
+  printf 'server=%s\n' "$server"
+}
+
+proto_sso_host_extract() {
+  local name="$1" out
+  command -v gp-saml-gui >/dev/null 2>&1 || {
+    echo "ERROR: gp-saml-gui is not installed on this machine." >&2
+    echo "       sudo apt install gp-saml-gui  (56 KB; its dependencies are already" >&2
+    echo "       present on a desktop)" >&2
+    return 1
+  }
+  [[ -n "${GATEWAY:-}" ]] || { echo "ERROR: no gateway known for ${name}." >&2; return 1; }
+
+  # -K: do not keep the identity provider session. It would make the next login
+  # shorter by storing a session on disk, and this project rejects persisted
+  # credentials - an IdP session is one.
+  #
+  # Deliberately NOT -S or -P: those make the tool exec openconnect on THIS
+  # machine, which would connect the host instead of the container. That is the
+  # failure this whole arrangement exists to make impossible, so the flags are
+  # never passed and the tool's default - print and exit - is what is used.
+  out="$(gp-saml-gui -K -g "$GATEWAY" 2>/dev/null)" || {
+    echo "ERROR: the SAML exchange did not complete." >&2
+    echo "       The login window was closed, or the portal refused it. Nothing has" >&2
+    echo "       been sent to the gateway." >&2
+    return 1
+  }
+  printf '%s\n' "$out" | proto_sso_host_parse
 }

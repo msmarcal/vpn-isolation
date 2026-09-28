@@ -66,7 +66,7 @@ detect_split_routes() {
   local iface="$1"
   local window="${VPN_ROUTE_SETTLE_WINDOW:-20}"
   local interval="${VPN_ROUTE_SETTLE_INTERVAL:-1}"
-  local current="" previous="" elapsed=0
+  local current="" previous="" elapsed=0 step
 
   while (( elapsed < window )); do
     # Sorted so that the stability comparison is not fooled by kernel ordering.
@@ -81,7 +81,12 @@ detect_split_routes() {
     fi
     previous="$current"
     sleep "$interval"
-    elapsed=$(( elapsed + interval ))
+    # Accounting advances by at least one even when the interval is fractional
+    # or zero, so the loop always terminates. Without this a zero interval spins
+    # forever - only reachable from a test, but still a real trap.
+    step="${interval%%.*}"
+    (( step < 1 )) && step=1
+    elapsed=$(( elapsed + step ))
   done
 
   # Window expired. Whatever is there (usually nothing) is the answer; a

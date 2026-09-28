@@ -1,0 +1,4 @@
+HOST=https://127.0.0.1:18801/gateway:prelogin-cookie
+USER=test.user@example.com
+COOKIE=SYNTHETIC-PRELOGIN-COOKIE-0123456789abcdef
+OS=linux-64

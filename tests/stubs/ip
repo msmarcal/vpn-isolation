@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Enough of iproute2 for the routing helpers, and nothing that touches the host.
+#
+#   STUB_IP_ROUTES      comma-separated prefixes 'route show dev' reports
+#   STUB_IP_FAIL_CIDR   a prefix that 'route replace|add' refuses
+#   STUB_IP_LINKS       comma-separated interface names that exist
+#   STUB_IP_DEFAULT_DEV device the default route is on (empty = no default)
+echo "ip $*" >> "${STUB_LOG:-/dev/null}"
+
+want() { [[ ",${2}," == *",${1},"* ]]; }
+
+case "$1 ${2:-}" in
+  "route show")
+    if [[ "${3:-}" == "dev" ]]; then
+      IFS=, read -ra r <<< "${STUB_IP_ROUTES:-}"
+      for x in "${r[@]}"; do [[ -n "$x" ]] && echo "$x dev ${4} scope link"; done
+      exit 0
+    fi
+    if [[ "${3:-}" == "default" ]]; then
+      [[ -n "${STUB_IP_DEFAULT_DEV:-}" ]] && echo "default via 10.0.0.1 dev ${STUB_IP_DEFAULT_DEV}"
+      exit 0
+    fi
+    exit 0 ;;
+  "route replace"|"route add")
+    if [[ -n "${STUB_IP_FAIL_CIDR:-}" && "${3:-}" == "${STUB_IP_FAIL_CIDR}" ]]; then
+      echo "Error: Invalid prefix for given prefix length." >&2
+      exit 2
+    fi
+    exit 0 ;;
+  "link show")
+    want "${3:-}" "${STUB_IP_LINKS:-}" && exit 0
+    echo "Device \"${3:-}\" does not exist." >&2
+    exit 1 ;;
+  "-br addr"|"-br link")
+    echo "${4:-iface}           UNKNOWN        10.99.0.2/32"
+    exit 0 ;;
+esac
+exit 0

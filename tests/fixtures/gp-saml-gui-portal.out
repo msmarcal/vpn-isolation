@@ -1,0 +1,4 @@
+HOST=https://127.0.0.1:18802/portal:portal-userauthcookie
+USER=test.user@example.com
+COOKIE=SYNTHETIC-PORTAL-USERAUTHCOOKIE-0123456789abcdef
+OS=linux-64

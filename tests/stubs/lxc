@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Records every call and captures what `file push` would have sent into a
+# container, so host-side rendering is checked with no LXD daemon.
+#
+#   STUB_LXC_STATUS   what `lxc info` reports (default RUNNING)
+#   STUB_PUSH_DIR     where pushed files land, named after their target
+echo "lxc $*" >> "${STUB_LOG:-/dev/null}"
+
+if [[ "${1:-}" == "file" && "${2:-}" == "push" ]]; then
+  # Source and destination are always the last two arguments. Taking them from
+  # the end avoids counting flags, whose values (--uid 0) are separate words.
+  argv=("$@"); src="${argv[-2]}"; dest="${argv[-1]}"
+  [[ -n "${STUB_PUSH_DIR:-}" && -f "$src" ]] && cp "$src" "${STUB_PUSH_DIR}/$(basename "$dest")"
+  exit 0
+fi
+
+if [[ "${1:-}" == "info" ]]; then
+  echo "Status: ${STUB_LXC_STATUS:-RUNNING}"
+  exit 0
+fi
+exit 0

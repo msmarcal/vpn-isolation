@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Records the call, then runs the rest so `sudo ip ...` still reaches the ip
+# stub. Grants nothing: this is a test double, not a privilege tool.
+echo "sudo $*" >> "${STUB_LOG:-/dev/null}"
+exec "$@"

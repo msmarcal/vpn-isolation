@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# STUB_PGREP_ALIVE - comma-separated process names that are "running".
+echo "pgrep $*" >> "${STUB_LOG:-/dev/null}"
+for a in "$@"; do
+  case "$a" in -*) continue ;; esac
+  if [[ ",${STUB_PGREP_ALIVE:-}," == *",${a},"* ]]; then echo 4242; exit 0; fi
+done
+exit 1

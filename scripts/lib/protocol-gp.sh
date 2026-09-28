@@ -214,8 +214,17 @@ finish_connect "$VPN_INTERFACE"
 HELPER_EOF
   } > "$tmp/connect-vpn-saml-finish"
 
-  chmod +x "$tmp/connect-vpn-saml" "$tmp/connect-vpn-saml-finish"
-  lxc file push "$tmp/connect-vpn-saml" "$name/usr/local/bin/connect-vpn-saml" >/dev/null
-  lxc file push "$tmp/connect-vpn-saml-finish" "$name/usr/local/bin/connect-vpn-saml-finish" >/dev/null
-  lxc exec "$name" -- chmod +x /usr/local/bin/connect-vpn-saml /usr/local/bin/connect-vpn-saml-finish
+  # Same ownership and mode install_helpers gives connect-vpn: root:root 0755.
+  # Without --uid/--gid these land owned by the HOST user's numeric uid, which
+  # is unmapped inside the container, and group-writable by it.
+  #
+  # Setting the mode here also removes the `lxc exec ... chmod` this used to
+  # need. That matters beyond tidiness: --refresh-helpers re-runs this hook and
+  # is documented to work on a stopped container, where `lxc file push` works
+  # but `lxc exec` fails - and under `set -e` that aborted the whole refresh.
+  local f
+  for f in connect-vpn-saml connect-vpn-saml-finish; do
+    lxc file push --uid 0 --gid 0 --mode 0755 \
+      "$tmp/$f" "$name/usr/local/bin/$f" >/dev/null
+  done
 }

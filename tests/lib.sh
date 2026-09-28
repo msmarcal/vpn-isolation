@@ -6,8 +6,11 @@
 # If something here starts needing a library, it is the wrong test for this repo
 # (see CLAUDE.md).
 
-# Consumed by the tests that source this file, not here.
-# shellcheck disable=SC2034
+# SC2034: consumed by the tests that source this file, not here.
+# SC1090/SC1091: render_for resolves its sources from REPO_ROOT at runtime, which
+# is what lets the suite run from anywhere - shellcheck cannot follow that and
+# does not need to.
+# shellcheck disable=SC2034,SC1090,SC1091
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIB_DIR="${REPO_ROOT}/scripts/lib"
 TESTS_DIR="${REPO_ROOT}/tests"
@@ -126,6 +129,28 @@ use_stubs() {
 }
 
 stub_log() { cat "$STUB_LOG" 2>/dev/null || true; }
+
+# render_for PROTO FUNC - render in a subshell so each plugin's definitions
+# cannot leak into the next. Needs common.sh and orchestrator.sh sourced by the
+# caller too, since the render_* functions read PROTOCOL and friends as globals.
+render_for() {
+  ( source "${LIB_DIR}/common.sh"
+    source "${LIB_DIR}/orchestrator.sh"
+    PROTOCOL="$1"
+    source "${LIB_DIR}/protocol-$1.sh"
+    "$2" )
+}
+
+# runnable PROTO - the rendered command, pointed at a throwaway env file so it
+# can be executed. Every client is stubbed, so nothing can bring up a tunnel.
+# Two test files need this: t-render checks what the command does, t-readme
+# checks that the subcommands the README shows are ones it accepts.
+runnable() {
+  local out="${TMPD}/vpn.$1"
+  printf 'VPN_PROTOCOL=%s\nVPN_ROUTES=10.1.0.0/16\nVPN_INTERFACE=vpn0\nVPN_GATEWAY=vpn.example.com\nVPN_OVPN=/dev/null\n' "$1" > "${TMPD}/env.$1"
+  render_for "$1" render_vpn | sed "s#^ENV_FILE=/etc/vpn-client.env#ENV_FILE=${TMPD}/env.$1#" > "$out"
+  printf '%s' "$out"
+}
 
 finish() {
   if (( FAILED > 0 )); then

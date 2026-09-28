@@ -190,6 +190,9 @@ faked.
 ```text
 vpn-isolation/
 ├── README.md
+├── LICENSE                            # MIT
+├── .gitignore                         # blocks .ovpn, certs, keys, credentials
+├── .markdownlint.yaml                 # aligned tables, ATX headings
 ├── docs/
 │   ├── lxd-vpn-client-containers.md   # full setup, key reference, troubleshooting
 │   └── adding-a-protocol.md           # plugin contract for new VPN protocols

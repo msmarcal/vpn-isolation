@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# sleep, as a no-op. A test must never spend wall-clock time - the same reason
+# use_stubs caps every poll window - and some loops are not parameterized at all:
+# wait_for_iface is a hardcoded `seq 1 40` with `sleep 1`, so a connect that never
+# sees its interface costs 40 real seconds.
+#
+# Deliberately not logged. Everything else here records its call because tests
+# assert on what was invoked; forty sleeps would just bury that.
+exit 0

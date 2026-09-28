@@ -15,25 +15,6 @@ use_stubs
 
 PROTOCOLS=(anyconnect gp openvpn fortissl)
 
-# render_for PROTO FUNC - render in a subshell so each plugin's definitions
-# cannot leak into the next.
-render_for() {
-  ( source "${LIB_DIR}/common.sh"
-    source "${LIB_DIR}/orchestrator.sh"
-    PROTOCOL="$1"
-    source "${LIB_DIR}/protocol-$1.sh"
-    "$2" )
-}
-
-# runnable PROTO - the rendered command, pointed at a throwaway env file so it
-# can be executed. Every client is stubbed, so nothing can bring up a tunnel.
-runnable() {
-  local out="${TMPD}/vpn.$1"
-  printf 'VPN_PROTOCOL=%s\nVPN_ROUTES=10.1.0.0/16\nVPN_INTERFACE=vpn0\nVPN_GATEWAY=vpn.example.com\nVPN_OVPN=/dev/null\n' "$1" > "${TMPD}/env.$1"
-  render_for "$1" render_vpn | sed "s#^ENV_FILE=/etc/vpn-client.env#ENV_FILE=${TMPD}/env.$1#" > "$out"
-  printf '%s' "$out"
-}
-
 for p in "${PROTOCOLS[@]}"; do
   vpn="$(render_for "$p" render_vpn)"
   parses_ok "the vpn command parses ($p)" "$vpn"

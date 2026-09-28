@@ -4,18 +4,18 @@ Isolate corporate VPNs inside LXD containers so they never touch the host's rout
 
 ## Supported protocol patterns
 
-| Example use case | Protocol | Client tooling inside container | Notes |
-|---|---|---|---|
-| Cisco AnyConnect / ASA-Firepower with SAML or token MFA | Cisco AnyConnect (openconnect) | `openconnect --protocol=anyconnect` | Gateway path matters (e.g. a group-specific path). Need openconnect **9.21+** on updated ASA/Firepower. Prefer the CLI over GUI auth dialogs. |
-| Palo Alto GlobalProtect | GlobalProtect (openconnect) | `openconnect --protocol=gp` | Same openconnect binary, different protocol. Portal vs gateway URL may differ - confirm with the vendor's portal docs. |
-| OpenVPN (server-issued profile) | OpenVPN | `openvpn` + `.ovpn` profile (+ optional auth user-pass / certs) | Usually a single `.ovpn` export from the server admin. Keep certs/keys only inside the container. |
-| FortiGate SSL VPN | FortiSSL VPN | `openfortivpn` | Gateway + username/password, often with OTP/2FA. Password is prompted interactively; no good way to pre-supply it without storing plaintext credentials (security risk). |
+| Example use case                                        | Protocol                       | Client tooling inside container                                 | Notes                                                                                                                                                                    |
+| ------------------------------------------------------- | ------------------------------ | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Cisco AnyConnect / ASA-Firepower with SAML or token MFA | Cisco AnyConnect (openconnect) | `openconnect --protocol=anyconnect`                             | Gateway path matters (e.g. a group-specific path). Need openconnect **9.21+** on updated ASA/Firepower. Prefer the CLI over GUI auth dialogs.                            |
+| Palo Alto GlobalProtect                                 | GlobalProtect (openconnect)    | `openconnect --protocol=gp`                                     | Same openconnect binary, different protocol. Portal vs gateway URL may differ - confirm with the vendor's portal docs.                                                   |
+| OpenVPN (server-issued profile)                         | OpenVPN                        | `openvpn` + `.ovpn` profile (+ optional auth user-pass / certs) | Usually a single `.ovpn` export from the server admin. Keep certs/keys only inside the container.                                                                        |
+| FortiGate SSL VPN                                       | FortiSSL VPN                   | `openfortivpn`                                                  | Gateway + username/password, often with OTP/2FA. Password is prompted interactively; no good way to pre-supply it without storing plaintext credentials (security risk). |
 
 Add a new container with the matching `--protocol` template for any new VPN. If a VPN **mandates** a proprietary native client with GUI/HostScan/posture-check requirements, use a VM instead of a container.
 
 ## Architecture
 
-```
+```text
 Host (laptop)
 ├── local LAN + LXD bridge (never touched by VPN containers)
 ├── ~/.ssh/config.d/<project>-config   # ProxyJump into container
@@ -277,11 +277,11 @@ Hand edits skip that validation, so double-check the format. After `vpn connect`
 
 The declaration does two things. For OpenVPN it decides how the client treats the routes a server pushes:
 
-| `VPN_TUNNEL_MODE` | `VPN_ROUTES`     | What the client is told                                     |
-| ----------------- | ---------------- | ------------------------------------------------------------- |
-| `split`           | `auto`           | accept the server's subnets, ignore its default route          |
-| `split`           | explicit CIDRs   | discard everything pushed; only the listed routes are added    |
-| `full`            | either           | accept everything, default route included                      |
+| `VPN_TUNNEL_MODE` | `VPN_ROUTES`   | What the client is told                                     |
+| ----------------- | -------------- | ----------------------------------------------------------- |
+| `split`           | `auto`         | accept the server's subnets, ignore its default route       |
+| `split`           | explicit CIDRs | discard everything pushed; only the listed routes are added |
+| `full`            | either         | accept everything, default route included                   |
 
 For every protocol, including the three whose clients cannot be told any of this, it decides how `vpn connect` reports the default route. A `full` container is told its default route on the tunnel is expected. A `split` container whose client took the default route anyway is told the invariant is broken, in as many words - and the route is left alone, because this reports the invariant rather than enforcing it. Reject a design that silently rewrites it.
 
@@ -296,12 +296,12 @@ it will not install a route it finds missing. The state is in the text rather th
 the exit status - reporting successfully is success, whatever the state, so this is
 a report for a person rather than something to branch on in a script.
 
-| State       | What it means                                                                    |
-| ----------- | ---------------------------------------------------------------------------------- |
-| `down`      | no client running and no tunnel interface                                          |
+| State       | What it means                                                                                            |
+| ----------- | -------------------------------------------------------------------------------------------------------- |
+| `down`      | no client running and no tunnel interface                                                                |
 | `connected` | client running, interface up, every expected route installed, default route where the declared mode says |
-| `degraded`  | client running, but a route is missing or the default route is not where the declared mode says |
-| `stale`     | no client running, but the interface and its routes are still there - run `vpn disconnect` |
+| `degraded`  | client running, but a route is missing or the default route is not where the declared mode says          |
+| `stale`     | no client running, but the interface and its routes are still there - run `vpn disconnect`               |
 
 Two things it is careful about. A client can exit without removing its record, so
 being alive is established from the process - both its id **and** its name, because
@@ -326,19 +326,19 @@ Written once at creation and sourced by `vpn connect` / `vpn disconnect` on ever
 
 Because the file is `source`d, it is shell syntax. Plain values (hostnames, paths, CIDR lists) are written bare; any value with a space, quote, `$` or other shell character is written in single quotes, e.g. `VPN_GATEWAY='vpn.example.com/my group'`. Keep that quoting when editing by hand.
 
-| Key | Set for | Meaning |
-|---|---|---|
-| `VPN_PROTOCOL` | all | Which protocol the container was built for. **Do not edit.** `--refresh-helpers` reads it to decide which protocol's `vpn connect` to generate, but it installs no packages, so pointing it at another protocol produces a container that cannot connect. Recreate the container instead. |
-| `VPN_ROUTES` | all | Comma-separated split routes, no spaces. `auto` (the default) reads back the routes the client installed on the tunnel, for every protocol; empty behaves the same as `auto`. See "Split routes" above for what `auto` can and cannot find. |
-| `VPN_INTERFACE` | all | Expected tunnel interface. `vpn0` by default, `ppp0` for fortissl. `vpn connect` overwrites it at runtime with whatever actually appeared. |
-| `VPN_GATEWAY` | anyconnect, gp, fortissl | Portal/gateway host, including any group path for anyconnect. |
-| `VPN_OVPN` | openvpn | Path to the profile inside the container (`/etc/openvpn/client/client.ovpn`). |
-| `VPN_AUTH_MODE` | all | `native` (default) or `sso`. Which authentication path a bare `vpn connect` takes. **Absent in containers created before it existed**, where it reads as `native`. `vpn connect --sso` / `--native` override it for one run without writing here. Setting it to `sso` for a protocol with no SSO path makes `vpn connect` refuse, naming the protocol. |
-| `VPN_TUNNEL_MODE` | all | `split` (default) or `full`. Declares whether the container's default route should stay on `eth0`. It is intent, not mechanism: OpenVPN derives its client flags from it, and for every protocol it decides how `vpn connect` describes the default route. **Absent in containers created before it existed**, where it is derived - `full` when `VPN_ROUTE_NOPULL=0`, `split` otherwise - so nothing has to be edited. |
-| `VPN_ROUTE_NOPULL` | openvpn | `1` passes `--route-nopull`, discarding every route the server pushes. `0` accepts them all. **Written only when asked for**, and it overrides `VPN_TUNNEL_MODE` when present, so a container that has it keeps behaving exactly as it did. No flag sets it any more; add it by hand for the rare case where you want the client to ignore the server's routes entirely. |
-| `VPN_FORTI_USER` | fortissl | Username passed to `openfortivpn`. Falls back to `$USER` if empty. |
-| `VPN_FORTI_PORT` | fortissl | Gateway port, defaults to `443`. |
-| `VPN_FORTI_OTP_REQUIRED` | fortissl | Any non-empty value makes `vpn connect` prompt for an OTP/2FA token. Empty = no prompt. |
+| Key                      | Set for                  | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------ | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VPN_PROTOCOL`           | all                      | Which protocol the container was built for. **Do not edit.** `--refresh-helpers` reads it to decide which protocol's `vpn connect` to generate, but it installs no packages, so pointing it at another protocol produces a container that cannot connect. Recreate the container instead.                                                                                                                               |
+| `VPN_ROUTES`             | all                      | Comma-separated split routes, no spaces. `auto` (the default) reads back the routes the client installed on the tunnel, for every protocol; empty behaves the same as `auto`. See "Split routes" above for what `auto` can and cannot find.                                                                                                                                                                             |
+| `VPN_INTERFACE`          | all                      | Expected tunnel interface. `vpn0` by default, `ppp0` for fortissl. `vpn connect` overwrites it at runtime with whatever actually appeared.                                                                                                                                                                                                                                                                              |
+| `VPN_GATEWAY`            | anyconnect, gp, fortissl | Portal/gateway host, including any group path for anyconnect.                                                                                                                                                                                                                                                                                                                                                           |
+| `VPN_OVPN`               | openvpn                  | Path to the profile inside the container (`/etc/openvpn/client/client.ovpn`).                                                                                                                                                                                                                                                                                                                                           |
+| `VPN_AUTH_MODE`          | all                      | `native` (default) or `sso`. Which authentication path a bare `vpn connect` takes. **Absent in containers created before it existed**, where it reads as `native`. `vpn connect --sso` / `--native` override it for one run without writing here. Setting it to `sso` for a protocol with no SSO path makes `vpn connect` refuse, naming the protocol.                                                                  |
+| `VPN_TUNNEL_MODE`        | all                      | `split` (default) or `full`. Declares whether the container's default route should stay on `eth0`. It is intent, not mechanism: OpenVPN derives its client flags from it, and for every protocol it decides how `vpn connect` describes the default route. **Absent in containers created before it existed**, where it is derived - `full` when `VPN_ROUTE_NOPULL=0`, `split` otherwise - so nothing has to be edited. |
+| `VPN_ROUTE_NOPULL`       | openvpn                  | `1` passes `--route-nopull`, discarding every route the server pushes. `0` accepts them all. **Written only when asked for**, and it overrides `VPN_TUNNEL_MODE` when present, so a container that has it keeps behaving exactly as it did. No flag sets it any more; add it by hand for the rare case where you want the client to ignore the server's routes entirely.                                                |
+| `VPN_FORTI_USER`         | fortissl                 | Username passed to `openfortivpn`. Falls back to `$USER` if empty.                                                                                                                                                                                                                                                                                                                                                      |
+| `VPN_FORTI_PORT`         | fortissl                 | Gateway port, defaults to `443`.                                                                                                                                                                                                                                                                                                                                                                                        |
+| `VPN_FORTI_OTP_REQUIRED` | fortissl                 | Any non-empty value makes `vpn connect` prompt for an OTP/2FA token. Empty = no prompt.                                                                                                                                                                                                                                                                                                                                 |
 
 Passwords and tokens are deliberately absent: they are prompted for on every connect and never written to this file.
 
@@ -417,7 +417,7 @@ in containers created before this existed, where it reads as `native`.
 `vpn connect --sso` prints where to log in and then prompts for what the browser
 produced:
 
-```
+```text
 Open this in a browser on your own machine, NOT in this container:
 
   https://sts.example.com/adfs/ls/?SAMLRequest=...
@@ -455,9 +455,9 @@ and the server the exchange **actually** authenticated against, which may differ
 from the one first contacted when the portal redirects. Assuming either of the last
 two is why the helpers this replaced could not connect some portals at all.
 
-The helper is optional in both directions. A container works with no helper present
-- the section above is the whole flow - and the helper falls back to exactly that
-when the extraction tool is not installed, saying why. It refuses a stopped
+The helper is optional in both directions. A container works with no helper
+present (the section above is the whole flow), and the helper falls back to exactly
+that when the extraction tool is not installed, saying why. It refuses a stopped
 container rather than starting it, since that would be a change to your environment
 you did not ask for.
 
@@ -473,25 +473,25 @@ flow above with your real browser.
 
 ## Troubleshooting
 
-| Symptom | Check |
-|---|---|
-| cannot create tun | `lxc config set vpn-X security.privileged true` + restart |
-| Cisco/ASA auth 404 on `/` | rebuild openconnect (`--build-openconnect`) |
-| MFA/token login failed before token prompt | account lockout - wait / ask the VPN provider's IT |
-| GlobalProtect stuck on portal | confirm portal vs gateway URL; try `-v` |
-| GlobalProtect: `XML response has no "auth" node` | Portal is SAML-fronted (ADFS/Okta/Azure AD, often with a second factor) - a plain connect cannot finish that login. Use `vpn connect --sso`, or `scripts/vpn-sso-login.sh <container>` from your own machine - see "SSO logins" above |
-| SSO: `the login did not complete - no credential was supplied` | The browser step was abandoned, or a required value was left empty. Nothing was sent to the gateway; this is **not** an expired credential |
-| SSO: `the gateway refused the credential, or it had already expired` | The credential reached the gateway and was rejected. These live for seconds - repeat the browser step without pausing, or use the host-side helper, which removes the delay |
-| SSO: `could not get a login URL` | The gateway was not reachable or did not offer SSO. No credential has been sent - distinct from either row above |
-| OpenVPN connects but no internal access | subnet missing from `VPN_ROUTES`; or the server pushes a different topology. Containers created before `VPN_TUNNEL_MODE` existed may also carry `VPN_ROUTE_NOPULL=1`, which discards the server's routes and makes `auto` find nothing - give those an explicit `--routes`, or remove that key |
-| SSH timeout to internal host | `lxc exec vpn-X -- vpn status` - it names the state, the routes installed against those expected, and where the default route is |
-| host DNS/routes broken | VPN was started on the host - stop it and delete leftover `vpn0` |
-| fortissl: "requires interactive password entry" | missing `-t`: use `lxc exec -t vpn-X -- vpn connect` |
-| fortissl: PPP interface never appears | wrong password, or 2FA gateway without `VPN_FORTI_OTP_REQUIRED` set - check `sudo tail /var/log/openfortivpn.log` |
-| `vpn connect` stops at a sudo password prompt | non-root `--user` and a path is missing from the plugin's `proto_sudo_commands`; fix, then `--refresh-helpers` |
-| `vpn disconnect` says "VPN down." but traffic still flows | `vpn status` reporting `stale` confirms it - the client is gone but the interface and its routes remain. A process name missing from the plugin's `proto_client_processes` is the usual cause; fix, then `--refresh-helpers` |
-| a fix from a newer version of this repo has no effect | the container still has the helpers it was created with - `--refresh-helpers` |
-| fortissl: "Couldn't set tty to PPP discipline" on connect | Check `grep ppp /proc/tty/ldiscs` **on the host**. Empty: `sudo modprobe ppp_async` and persist it, see prerequisites - a container restart cannot fix this. Present: `lxc restart vpn-X` clears a stuck `/dev/ppp`, and if the container predates the disconnect fix, also `--refresh-helpers` |
+| Symptom                                                                                           | Check                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| cannot create tun                                                                                 | `lxc config set vpn-X security.privileged true` + restart                                                                                                                                                                                                                                                                                                        |
+| Cisco/ASA auth 404 on `/`                                                                         | rebuild openconnect (`--build-openconnect`)                                                                                                                                                                                                                                                                                                                      |
+| MFA/token login failed before token prompt                                                        | account lockout - wait / ask the VPN provider's IT                                                                                                                                                                                                                                                                                                               |
+| GlobalProtect stuck on portal                                                                     | confirm portal vs gateway URL; try `-v`                                                                                                                                                                                                                                                                                                                          |
+| GlobalProtect: `XML response has no "auth" node`                                                  | Portal is SAML-fronted (ADFS/Okta/Azure AD, often with a second factor) - a plain connect cannot finish that login. Use `vpn connect --sso`, or `scripts/vpn-sso-login.sh <container>` from your own machine - see "SSO logins" above                                                                                                                            |
+| SSO: `the login did not complete - no credential was supplied`                                    | The browser step was abandoned, or a required value was left empty. Nothing was sent to the gateway; this is **not** an expired credential                                                                                                                                                                                                                       |
+| SSO: `the gateway refused the credential, or it had already expired`                              | The credential reached the gateway and was rejected. These live for seconds - repeat the browser step without pausing, or use the host-side helper, which removes the delay                                                                                                                                                                                      |
+| SSO: `could not get a login URL`                                                                  | The gateway was not reachable or did not offer SSO. No credential has been sent - distinct from either row above                                                                                                                                                                                                                                                 |
+| OpenVPN connects but no internal access                                                           | subnet missing from `VPN_ROUTES`; or the server pushes a different topology. Containers created before `VPN_TUNNEL_MODE` existed may also carry `VPN_ROUTE_NOPULL=1`, which discards the server's routes and makes `auto` find nothing - give those an explicit `--routes`, or remove that key                                                                   |
+| SSH timeout to internal host                                                                      | `lxc exec vpn-X -- vpn status` - it names the state, the routes installed against those expected, and where the default route is                                                                                                                                                                                                                                 |
+| host DNS/routes broken                                                                            | VPN was started on the host - stop it and delete leftover `vpn0`                                                                                                                                                                                                                                                                                                 |
+| fortissl: "requires interactive password entry"                                                   | missing `-t`: use `lxc exec -t vpn-X -- vpn connect`                                                                                                                                                                                                                                                                                                             |
+| fortissl: PPP interface never appears                                                             | wrong password, or 2FA gateway without `VPN_FORTI_OTP_REQUIRED` set - check `sudo tail /var/log/openfortivpn.log`                                                                                                                                                                                                                                                |
+| `vpn connect` stops at a sudo password prompt                                                     | non-root `--user` and a path is missing from the plugin's `proto_sudo_commands`; fix, then `--refresh-helpers`                                                                                                                                                                                                                                                   |
+| `vpn disconnect` says "VPN down." but traffic still flows                                         | `vpn status` reporting `stale` confirms it - the client is gone but the interface and its routes remain. A process name missing from the plugin's `proto_client_processes` is the usual cause; fix, then `--refresh-helpers`                                                                                                                                     |
+| a fix from a newer version of this repo has no effect                                             | the container still has the helpers it was created with - `--refresh-helpers`                                                                                                                                                                                                                                                                                    |
+| fortissl: "Couldn't set tty to PPP discipline" on connect                                         | Check `grep ppp /proc/tty/ldiscs` **on the host**. Empty: `sudo modprobe ppp_async` and persist it, see prerequisites - a container restart cannot fix this. Present: `lxc restart vpn-X` clears a stuck `/dev/ppp`, and if the container predates the disconnect fix, also `--refresh-helpers`                                                                  |
 | fortissl: tunnel is up but `VPN_ROUTES` are not applied and nothing is in `/run/vpn-client/state` | The PPP wait loop used to abort the whole connect on its first iteration - `grep` exits 1 while no `ppp*` interface exists yet, and under `set -euo pipefail` that killed the script. The client survived because it runs under detached `screen`, so the tunnel came up unrouted and unrecorded. Fixed; run `--refresh-helpers` on containers created before it |
 
 ## Files

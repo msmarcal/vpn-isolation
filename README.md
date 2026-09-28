@@ -124,12 +124,12 @@ by symptom.
 
 ## Supported protocols
 
-| Protocol                             | Flag                                  | Browser-based SSO                          |
-| ------------------------------------ | ------------------------------------- | ------------------------------------------ |
-| Cisco AnyConnect (with optional MFA) | `--protocol anyconnect`               | yes                                        |
-| Palo Alto GlobalProtect              | `--protocol gp`                       | yes, with host-side automation             |
-| OpenVPN                              | `--protocol openvpn --ovpn <file>`    | no, the community client has no equivalent |
-| FortiGate SSL VPN                    | `--protocol fortissl`                 | yes                                        |
+| Protocol                             | Flag                               | Browser-based SSO                          |
+| ------------------------------------ | ---------------------------------- | ------------------------------------------ |
+| Cisco AnyConnect (with optional MFA) | `--protocol anyconnect`            | yes                                        |
+| Palo Alto GlobalProtect              | `--protocol gp`                    | yes, with host-side automation             |
+| OpenVPN                              | `--protocol openvpn --ovpn <file>` | no, the community client has no equivalent |
+| FortiGate SSL VPN                    | `--protocol fortissl`              | yes                                        |
 
 **SSO** means the login happens in a browser on your own machine, which is how SAML
 portals with a second factor work, and a short-lived credential is carried into the
@@ -187,7 +187,7 @@ faked.
 
 ## Repo layout
 
-```
+```text
 vpn-isolation/
 ├── README.md
 ├── docs/

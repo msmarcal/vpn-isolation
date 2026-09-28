@@ -1,0 +1,29 @@
+# markdownlint configuration
+# https://github.com/DavidAnson/markdownlint
+#
+# Rule reference: https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
+# Only the deviations from the defaults are listed below.
+
+# Enable all rules by default
+default: true
+
+# MD013 (line-length): disabled so long lines in prose and tables are allowed.
+MD013: false
+
+# MD003 (heading-style): require ATX headings ("# Title"),
+# never Setext ("Title" underlined with === or ---).
+MD003:
+  style: atx
+
+# MD031 (blanks-around-fences): fenced code blocks need a blank line before
+# and after, except inside list items, where the blank line would break
+# the list indentation.
+MD031:
+  list_items: false
+
+# MD060 (table-column-style): require aligned tables outright. The default,
+# "consistent", infers the style per table and reads a separator row written as
+# |---|---| as a declaration that the whole table is compact - which is how a
+# misaligned table passes.
+MD060:
+  style: aligned

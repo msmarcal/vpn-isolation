@@ -74,7 +74,10 @@ proto_connect_snippet() {
 # working. The source build and the distro package install the script in different
 # places, so neither is hardcoded.
 gp_hip_wrapper() {
-  local want="${VPN_GP_HIP:-auto}" c
+  # `-` and not `:-`: only an ABSENT key means auto. An empty one is an explicit
+  # "send no report" and must survive, which `:-` would silently turn back into
+  # auto - the documented way to disable this would not have worked.
+  local want="${VPN_GP_HIP-auto}" c
   [[ -n "$want" ]] || return 0
   if [[ "$want" != "auto" ]]; then
     if [[ -x "$want" ]]; then printf '%s' "$want"; else

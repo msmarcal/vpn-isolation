@@ -162,6 +162,12 @@ proto_write_env_interface() { echo "ppp0"; }
 #   name|kind|default|prompt      kind is "secret" (no echo) or "plain";
 #                                 an empty default makes the value required.
 #
+# Declare anything the gateway gets to disagree with, even when one value looks
+# obviously right. The gp plugin hardcoded the client OS it reported and a real
+# portal published a configuration only for Windows: the login succeeded, the
+# tunnel did not come up, and the error said the cookie had expired. Whatever the
+# browser exchange reports back belongs in this list, not in the snippet.
+#
 # This runs on the HOST, so orchestrator globals like $GATEWAY are available for a
 # default - unlike the snippets below.
 proto_sso_values() {

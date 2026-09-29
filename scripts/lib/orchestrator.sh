@@ -377,12 +377,19 @@ render_state_tmpfiles() {
   printf 'd /run/vpn-client 0755 %s %s -\n' "$user" "$user"
 }
 
-# REPLACED_COMMANDS - the per-action commands the single `vpn` command replaced.
-# install_helpers removes them, so a refreshed container ends up with the current
-# surface rather than holding both. Left in place they would keep working while
-# frozen at whatever version installed them, which is worse than either surface
-# alone. See openspec/specs/container-commands/.
-REPLACED_COMMANDS=(connect-vpn disconnect-vpn)
+# REPLACED_COMMANDS - container commands this project used to install and no
+# longer does. install_helpers removes each one, so a refreshed container ends up
+# with the current surface rather than holding both. Left in place they would keep
+# working while frozen at whatever version installed them, which is worse than
+# either surface alone. See openspec/specs/container-commands/.
+#
+# The list is not only about the connect-vpn/disconnect-vpn split. The two SAML
+# helpers were dropped when `vpn connect --sso` replaced them, and dropping them
+# from the plugin only stopped them being *written*: a real gp container refreshed
+# afterwards still carried both, executable, running the removed flow. That was
+# verified against a throwaway container, where they had never existed - so the
+# check passed and the containers that mattered kept them.
+REPLACED_COMMANDS=(connect-vpn disconnect-vpn connect-vpn-saml connect-vpn-saml-finish)
 
 # install_helpers NAME [USER] - render the container's `vpn` command and the
 # state directory rule, push them, and remove the commands they replaced.

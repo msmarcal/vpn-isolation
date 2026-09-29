@@ -44,6 +44,14 @@ proto_write_env_extra() {
   # env_kv (defined in common.sh) shell-quotes the value, so a gateway
   # path with spaces or shell metacharacters survives `source` intact.
   env_kv VPN_GATEWAY "$GATEWAY"
+  cat <<'EOF'
+# Host Information Profile. A GlobalProtect gateway may require a posture report
+# and, when it does not get one, establish the tunnel anyway and then limit what it
+# carries - so the symptom is a connected VPN that reaches the internal resolver
+# and nothing else. `auto` uses the hipreport.sh that openconnect ships, if it is
+# present. A path uses that script. Empty disables it, and the connect says so.
+EOF
+  env_kv VPN_GP_HIP auto
 }
 
 # proto_connect_snippet: emits the proto_connect function as TEXT, spliced into
@@ -51,6 +59,27 @@ proto_write_env_extra() {
 # variables must expand inside the container, not here.
 proto_connect_snippet() {
   cat <<'EOF'
+# gp_hip_wrapper - print the HIP report script to hand openconnect, or nothing.
+# Absent key means `auto`, because --refresh-helpers does not rewrite
+# /etc/vpn-client.env and containers created before this key exists must keep
+# working. The source build and the distro package install the script in different
+# places, so neither is hardcoded.
+gp_hip_wrapper() {
+  local want="${VPN_GP_HIP:-auto}" c
+  [[ -n "$want" ]] || return 0
+  if [[ "$want" != "auto" ]]; then
+    if [[ -x "$want" ]]; then printf '%s' "$want"; else
+      echo "WARNING: VPN_GP_HIP=${want} is not executable; sending no HIP report." >&2
+    fi
+    return 0
+  fi
+  for c in /usr/local/libexec/openconnect/hipreport.sh \
+           /usr/libexec/openconnect/hipreport.sh; do
+    [[ -x "$c" ]] && { printf '%s' "$c"; return 0; }
+  done
+  return 0
+}
+
 proto_connect() {
   [[ -n "$VPN_GATEWAY" ]] || { echo "VPN_GATEWAY empty" >&2; exit 1; }
   echo "Connecting openconnect protocol=gp to ${VPN_GATEWAY}"
@@ -61,11 +90,22 @@ proto_connect() {
   #
   # NOTE: if this fails with 'XML response has no "auth" node', the portal is
   # SAML-fronted (ADFS/Okta/Azure AD + Duo etc) and plain openconnect cannot
-  # complete the login by itself. Use connect-vpn-saml / connect-vpn-saml-finish
-  # instead (installed alongside this script - see their --help/usage output).
+  # complete the login by itself. Use `vpn connect --sso`, which carries out that
+  # exchange in a browser on the operator's own machine. It replaced the
+  # connect-vpn-saml / connect-vpn-saml-finish pair this note used to name.
+  HIP_ARGS=()
+  HIP="$(gp_hip_wrapper)"
+  if [[ -n "$HIP" ]]; then
+    HIP_ARGS+=(--csd-wrapper="$HIP")
+    echo "  HIP report: ${HIP}"
+  else
+    echo "  HIP report: none (VPN_GP_HIP). A gateway that requires one may limit" >&2
+    echo "              what the tunnel carries without saying so." >&2
+  fi
   sudo openconnect \
     --protocol=gp \
     --interface="$VPN_INTERFACE" \
+    "${HIP_ARGS[@]}" \
     -b \
     "$VPN_GATEWAY"
   # openconnect honors --interface when it can, but falls back to tun0; accept
@@ -108,6 +148,13 @@ proto_sso_values() {
   printf 'username|plain||SAML username from the browser\n'
   printf 'cookie|secret||Session cookie (prelogin-cookie or portal-userauthcookie)\n'
   printf 'usergroup|plain|gateway:prelogin-cookie|Usergroup path\n'
+  # Declared rather than assumed, for the same reason as the two above. A portal
+  # publishes client configurations per OS and hands out none for an OS it does not
+  # know: the Lear portal answers `Matching client config not found` to a Linux
+  # client while a Windows one connects. This was hardcoded to linux-64 and cost a
+  # live login to find, because the failure arrives AFTER the credential is
+  # accepted and looked exactly like a rejected cookie.
+  printf 'os|plain|linux-64|Client OS the portal publishes a config for (linux-64, win, mac-intel)\n'
 }
 
 # Absolute paths the SSO path runs under sudo, on top of proto_sudo_commands.
@@ -156,20 +203,47 @@ proto_sso_connect_snippet() {
 proto_sso_connect() {
   local server="${SSO_server:-$VPN_GATEWAY}"
   echo
+  local client_os="${SSO_os:-linux-64}"
   echo "Completing SAML login as ${SSO_username} against ${server}"
   echo "  usergroup: ${SSO_usergroup}"
+  echo "  client OS: ${client_os}"
+
+  # The client's own output is kept so the failure below can name a cause instead
+  # of guessing one. 0600 and removed on both paths: it holds openconnect's
+  # transcript, not the cookie, but nothing here gets to be readable by default.
+  #
+  # REDIRECTED, never piped. `-b` makes openconnect fork and keep the inherited
+  # stdout open in the daemon, so `| tee` never sees EOF and the connect hangs
+  # forever with the tunnel already up - which is exactly what happened the first
+  # time this was written that way, against a live gateway.
+  local log
+  log="$(mktemp "${TMPDIR:-/tmp}/.vpn-sso-log.XXXXXX")"
+  chmod 600 "$log"
 
   # The credential goes on stdin, never in the argument list: an argument is
   # visible in the container's process table and in shell history.
+  local hip
+  hip="$(gp_hip_wrapper)"
+  local hip_args=()
+  if [[ -n "$hip" ]]; then
+    hip_args+=(--csd-wrapper="$hip")
+    echo "  HIP report: ${hip}"
+  else
+    echo "  HIP report: none - a gateway that requires one connects and then limits"
+    echo "              what the tunnel carries, which reads as a routing problem."
+  fi
+
   printf '%s' "$SSO_cookie" | sudo openconnect \
     --protocol=gp \
     --user="$SSO_username" \
     --usergroup="$SSO_usergroup" \
-    --os=linux-64 \
+    --os="$client_os" \
     --passwd-on-stdin \
     --interface="$VPN_INTERFACE" \
+    "${hip_args[@]}" \
     -b \
-    "$server" || true
+    "$server" > "$log" 2>&1 || true
+  cat "$log"
   # `|| true` on purpose: a client that refuses the credential exits non-zero, and
   # under `set -euo pipefail` that would kill this function before the check below
   # - so the operator would get no message at all instead of the one that says the
@@ -177,11 +251,27 @@ proto_sso_connect() {
 
   local new_iface
   new_iface="$(wait_for_iface "$VPN_INTERFACE" tun0)" || {
-    echo "ERROR: the gateway refused the credential, or it had already expired." >&2
-    echo "       These cookies live for seconds, not minutes. Run 'vpn connect --sso'" >&2
-    echo "       again and do the browser step without pausing." >&2
+    # Two failures look identical from here - no interface - and they have nothing
+    # to do with each other. Saying "expired cookie" to someone whose login the
+    # gateway accepted sends them to repeat a browser step that was never the
+    # problem, which is the defect the removed SAML helpers had.
+    if grep -qiE 'matching client config not found|getconfig\.esp' "$log" 2>/dev/null; then
+      echo "ERROR: the gateway accepted the login and then published no client" >&2
+      echo "       configuration for os=${client_os}." >&2
+      echo "       The credential was fine: authentication-source appears above." >&2
+      echo "       The portal serves configs per OS, so try one it knows:" >&2
+      echo "         vpn connect --sso        and answer 'win' when it asks for os" >&2
+      echo "       From your own machine, the host helper takes it as an override:" >&2
+      echo "         VPN_SSO_CLIENTOS=Windows scripts/vpn-sso-login.sh <container>" >&2
+    else
+      echo "ERROR: the gateway refused the credential, or it had already expired." >&2
+      echo "       These cookies live for seconds, not minutes. Run 'vpn connect --sso'" >&2
+      echo "       again and do the browser step without pausing." >&2
+    fi
+    rm -f "$log"
     return 1
   }
+  rm -f "$log"
   VPN_INTERFACE="$new_iface"
 }
 EOF
@@ -204,7 +294,7 @@ EOF
 # evaluated: a value must not be able to run anything, the same rule that governs
 # the container's environment file.
 proto_sso_host_parse() {
-  local line key value host="" user="" cookie="" server="" usergroup=""
+  local line key value host="" user="" cookie="" server="" usergroup="" os=""
   while IFS= read -r line; do
     [[ "$line" == *=* ]] || continue
     key="${line%%=*}"
@@ -215,6 +305,11 @@ proto_sso_host_parse() {
       HOST)   host="$value" ;;
       USER)   user="$value" ;;
       COOKIE) cookie="$value" ;;
+      # The tool reports the OS it carried out the exchange as, already in
+      # openconnect's vocabulary rather than its own --clientos one. Passing it on
+      # is what keeps the two halves agreeing; discarding it, as this did, is how a
+      # Linux exchange ended up asking a Windows-only portal for a config.
+      OS)     os="$value" ;;
     esac
   done
 
@@ -236,6 +331,10 @@ proto_sso_host_parse() {
   printf 'cookie=%s\n' "$cookie"
   printf 'usergroup=%s\n' "$usergroup"
   printf 'server=%s\n' "$server"
+  # Only when the tool said so. An empty line here would override the declared
+  # default with nothing, which is worse than not sending the value at all.
+  [[ -n "$os" ]] && printf 'os=%s\n' "$os"
+  return 0
 }
 
 proto_sso_host_extract() {
@@ -256,7 +355,18 @@ proto_sso_host_extract() {
   # machine, which would connect the host instead of the container. That is the
   # failure this whole arrangement exists to make impossible, so the flags are
   # never passed and the tool's default - print and exit - is what is used.
-  out="$(gp-saml-gui -K -g "$GATEWAY" 2>/dev/null)" || {
+  # --clientos picks which client configuration the portal will be asked for, and
+  # a portal hands out none for an OS it does not publish. Default Linux, since
+  # that is what the container runs; VPN_SSO_CLIENTOS=Windows is the way out when
+  # the portal only knows Windows clients, as the Lear one does.
+  local clientos="${VPN_SSO_CLIENTOS:-Linux}"
+  case "$clientos" in
+    Windows|Mac|Linux) ;;
+    *) echo "ERROR: VPN_SSO_CLIENTOS must be Windows, Mac or Linux (got: ${clientos})." >&2
+       return 1 ;;
+  esac
+
+  out="$(gp-saml-gui -K --clientos "$clientos" -g "$GATEWAY" 2>/dev/null)" || {
     echo "ERROR: the SAML exchange did not complete." >&2
     echo "       The login window was closed, or the portal refused it. Nothing has" >&2
     echo "       been sent to the gateway." >&2

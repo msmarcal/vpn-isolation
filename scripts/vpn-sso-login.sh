@@ -64,6 +64,13 @@ GATEWAY="$(lxc file pull "${NAME}/etc/vpn-client.env" - 2>/dev/null \
              | awk -F= '/^VPN_GATEWAY=/ {print $2; exit}')" || GATEWAY=""
 export GATEWAY
 
+# Whatever the container was told to report itself as. A plugin's extraction hook
+# may need it in its own tool's spelling, so it is passed through raw rather than
+# translated here.
+CLIENT_OS="$(lxc file pull "${NAME}/etc/vpn-client.env" - 2>/dev/null \
+             | awk -F= '/^VPN_GP_CLIENT_OS=/ {print $2; exit}')" || CLIENT_OS=""
+export CLIENT_OS
+
 fall_back() {
   echo "$1" >&2
   echo "Falling back to the container's own SSO flow: it prints the login URL" >&2

@@ -52,6 +52,15 @@ proto_write_env_extra() {
 # present. A path uses that script. Empty disables it, and the connect says so.
 EOF
   env_kv VPN_GP_HIP auto
+  cat <<'EOF'
+# Which client OS to report. A portal publishes a client configuration per OS and
+# hands out none for one it does not know, so a gateway that only knows Windows
+# clients answers `Matching client config not found` to a Linux one - after
+# accepting the credential, which makes it look like an expired cookie. Values are
+# openconnect's: linux-64, linux, win, mac-intel. The host-side SSO helper
+# translates this into gp-saml-gui's own vocabulary so both halves agree.
+EOF
+  env_kv VPN_GP_CLIENT_OS linux-64
 }
 
 # proto_connect_snippet: emits the proto_connect function as TEXT, spliced into
@@ -148,13 +157,12 @@ proto_sso_values() {
   printf 'username|plain||SAML username from the browser\n'
   printf 'cookie|secret||Session cookie (prelogin-cookie or portal-userauthcookie)\n'
   printf 'usergroup|plain|gateway:prelogin-cookie|Usergroup path\n'
-  # Declared rather than assumed, for the same reason as the two above. A portal
-  # publishes client configurations per OS and hands out none for an OS it does not
-  # know: the Lear portal answers `Matching client config not found` to a Linux
-  # client while a Windows one connects. This was hardcoded to linux-64 and cost a
-  # live login to find, because the failure arrives AFTER the credential is
-  # accepted and looked exactly like a rejected cookie.
-  printf 'os|plain|linux-64|Client OS the portal publishes a config for (linux-64, win, mac-intel)\n'
+  # The client OS is NOT declared here, for the same reason as the server: a
+  # declaration's default is baked into the rendered text, so it could not come from
+  # /etc/vpn-client.env, and an operator would have to retype it at every login. It
+  # arrives the same way the server does - the host hook sends `os=` on stdin, any
+  # name=value that arrives is kept whether or not it is declared - and otherwise
+  # proto_sso_connect falls back to VPN_GP_CLIENT_OS from the env file.
 }
 
 # Absolute paths the SSO path runs under sudo, on top of proto_sudo_commands.
@@ -169,7 +177,8 @@ proto_sso_url() {
   # Unauthenticated: this asks the portal for its auth form and gets a SAML
   # redirect instead. openconnect exits non-zero having sent no credential, so
   # the status is not a signal about one.
-  out="$(echo | sudo openconnect --protocol=gp --usergroup=gateway --os=linux-64 \
+  out="$(echo | sudo openconnect --protocol=gp --usergroup=gateway \
+           --os="${VPN_GP_CLIENT_OS:-linux-64}" \
            "$VPN_GATEWAY" 2>&1)" || true
 
   local url
@@ -203,7 +212,7 @@ proto_sso_connect_snippet() {
 proto_sso_connect() {
   local server="${SSO_server:-$VPN_GATEWAY}"
   echo
-  local client_os="${SSO_os:-linux-64}"
+  local client_os="${SSO_os:-${VPN_GP_CLIENT_OS:-linux-64}}"
   echo "Completing SAML login as ${SSO_username} against ${server}"
   echo "  usergroup: ${SSO_usergroup}"
   echo "  client OS: ${client_os}"
@@ -359,7 +368,20 @@ proto_sso_host_extract() {
   # a portal hands out none for an OS it does not publish. Default Linux, since
   # that is what the container runs; VPN_SSO_CLIENTOS=Windows is the way out when
   # the portal only knows Windows clients, as the Lear one does.
-  local clientos="${VPN_SSO_CLIENTOS:-Linux}"
+  # gp-saml-gui names these Windows/Mac/Linux where openconnect names them
+  # win/mac-intel/linux-64, so the container's key is translated rather than
+  # duplicated - one place to set it, two tools that need different spellings.
+  local clientos="${VPN_SSO_CLIENTOS:-}"
+  if [[ -z "$clientos" ]]; then
+    case "${CLIENT_OS:-}" in
+      win)                clientos=Windows ;;
+      mac-intel|mac)      clientos=Mac ;;
+      linux|linux-64|'')  clientos=Linux ;;
+      *) echo "WARNING: VPN_GP_CLIENT_OS=${CLIENT_OS} is not one openconnect knows;" >&2
+         echo "         carrying the exchange out as Linux." >&2
+         clientos=Linux ;;
+    esac
+  fi
   case "$clientos" in
     Windows|Mac|Linux) ;;
     *) echo "ERROR: VPN_SSO_CLIENTOS must be Windows, Mac or Linux (got: ${clientos})." >&2
